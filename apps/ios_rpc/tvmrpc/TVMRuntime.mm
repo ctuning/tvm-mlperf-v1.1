@@ -21,6 +21,9 @@
  * \file TVMRuntime.mm
  */
 #include "TVMRuntime.h"
+#include "rpc_server.h"
+#include "rpc_args.h"
+
 // Runtime API
 #include "../../../src/runtime/c_runtime_api.cc"
 #include "../../../src/runtime/cpu_device_api.cc"
@@ -38,6 +41,9 @@
 #include "../../../src/runtime/thread_pool.cc"
 #include "../../../src/runtime/threading_backend.cc"
 #include "../../../src/runtime/workspace_pool.cc"
+
+// RPC utils
+#include "../../../src/runtime/contrib/random/random.cc"
 
 // RPC server
 #include "../../../src/runtime/rpc/rpc_channel.cc"
@@ -62,6 +68,7 @@
 namespace tvm {
 namespace runtime {
 namespace detail {
+
 // Override logging mechanism
 void LogFatalImpl(const std::string& file, int lineno, const std::string& message) {
   throw tvm::runtime::InternalError(file, lineno, message);
@@ -70,12 +77,9 @@ void LogFatalImpl(const std::string& file, int lineno, const std::string& messag
 void LogMessageImpl(const std::string& file, int lineno, const std::string& message) {
   NSLog(@"%s:%d: %s", file.c_str(), lineno, message.c_str());
 }
-}
-}
-}  // namespace dmlc
 
-namespace tvm {
-namespace runtime {
+}  // namespace detail
+
 
 class NSStreamChannel final : public RPCChannel {
  public:
@@ -108,34 +112,18 @@ FEventHandler CreateServerEventHandler(NSOutputStream* outputStream, std::string
   };
 }
 
-// Runtime environment
-struct RPCEnv {
- public:
-  RPCEnv() {
-    NSString* path = NSTemporaryDirectory();
-    base_ = [path UTF8String];
-    if (base_[base_.length() - 1] != '/') {
-      base_ = base_ + '/';
-    }
-  }
-  // Get Path.
-  std::string GetPath(const std::string& file_name) { return base_ + file_name; }
-
- private:
-  std::string base_;
-};
-
 void LaunchSyncServer() {
-  // only load dylib from frameworks.
-  NSBundle* bundle = [NSBundle mainBundle];
-  NSString* base = [bundle privateFrameworksPath];
-  NSString* path = [base stringByAppendingPathComponent:@"tvm/rpc_config.txt"];
-  std::string name = [path UTF8String];
-  std::ifstream fs(name, std::ios::in);
-  std::string url, key;
-  int port;
-  ICHECK(fs >> url >> port >> key) << "Invalid RPC config file " << name;
-  RPCConnect(url, port, "server:" + key, TVMArgs(nullptr, nullptr, 0))->ServerLoop();
+  RPCArgs args = get_current_rpc_args();
+  if (args.proxy_mode) {
+    // Connect to proxy server
+    RPCConnect(args.tracker_url, args.tracker_port, "server:" + std::string(args.key), TVMArgs(nullptr, nullptr, 0))->ServerLoop();
+  } else {
+    // Connect to tracker server
+    tvm::runtime::RPCServer server("0.0.0.0", args.port, args.port_end,
+                                   "('" + std::string(args.tracker_url) + "', " + std::to_string(args.tracker_port) + ")",
+                                   args.key, "");
+    server.Start();
+  }
 }
 
 TVM_REGISTER_GLOBAL("tvm.rpc.server.workpath").set_body([](TVMArgs args, TVMRetValue* rv) {

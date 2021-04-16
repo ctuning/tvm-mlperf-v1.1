@@ -53,5 +53,7 @@
 
 - (IBAction)connect:(id)sender;
 - (IBAction)disconnect:(id)sender;
+@property (retain, nonatomic) IBOutlet UIButton *DisconnectButton;
+@property (retain, nonatomic) IBOutlet UIButton *ConnectButton;
 
 @end

@@ -22,6 +22,8 @@
  */
 
 #import "ViewController.h"
+
+#include "rpc_args.h"
 #include <string>
 
 @implementation ViewController
@@ -105,6 +107,40 @@
       }
     }
   }
+}
+
+- (void)viewDidLoad {
+  // TODO: improve UI with hiding keyboard at the and of editing
+//  self.proxyURL.delegate = self;
+//  self.proxyPort.delegate = self;
+//  self.proxyKey.delegate = self;
+
+  RPCArgs args = get_current_rpc_args();
+  self.proxyURL.text = [NSString stringWithUTF8String:args.tracker_url];
+  self.proxyPort.text = @(args.tracker_port).stringValue;
+  self.proxyKey.text = [NSString stringWithUTF8String:args.key];
+
+  // Connect to tracker immediately
+  if (args.immediate_connect) {
+    [self disableUIInteraction];
+    // run server in separate thread
+    [NSThread detachNewThreadWithBlock:^{
+      [TVMRuntime launchSyncServer];
+    }];
+  }
+}
+
+- (void)disableUIInteraction {
+  void (^disable)(UITextField* field) = ^(UITextField* field) {
+    field.enabled = NO;
+    field.backgroundColor = [UIColor lightGrayColor];
+  };
+
+  disable(self.proxyURL);
+  disable(self.proxyPort);
+  disable(self.proxyKey);
+  self.ConnectButton.enabled = NO;
+  self.DisconnectButton.enabled = NO;
 }
 
 - (void)onShutdownReceived {

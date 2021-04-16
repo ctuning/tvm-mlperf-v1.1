@@ -17,22 +17,32 @@
  * under the License.
  */
 
-/*!
- * \brief A hook to launch RPC server via xcodebuild test
- * \file tvmrpcLauncher.mm
- */
+#ifndef TVM_APPS_IOS_RPC_ARGS_H_
+#define TVM_APPS_IOS_RPC_ARGS_H_
 
-#import <XCTest/XCTest.h>
-#import "TVMRuntime.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-@interface tvmrpcLauncher : XCTestCase
+typedef struct RPCArgs_t {
+  const char* tracker_url;
+  int tracker_port;
+  
+  const char* key;
+  const char* custom_addr;
+  int port;
+  int port_end;
+  
+  char immediate_connect;
+  char proxy_mode;
+} RPCArgs;
 
-@end
+RPCArgs get_current_rpc_args(void);
+void update_rpc_args(int argc, char * argv[]);
+void set_current_rpc_args(RPCArgs args);
 
-@implementation tvmrpcLauncher
+#ifdef __cplusplus
+} // extern "C"
+#endif
 
-- (void)testRPC {
-  [TVMRuntime launchSyncServer];
-}
-
-@end
+#endif // TVM_APPS_IOS_RPC_ARGS_H_

@@ -52,7 +52,7 @@
                                 <fontDescription key="fontDescription" type="system" pointSize="14"/>
                                 <textInputTraits key="textInputTraits"/>
                             </textField>
-                            <button opaque="NO" contentMode="scaleToFill" fixedFrame="YES" contentHorizontalAlignment="center" contentVerticalAlignment="center" buttonType="roundedRect" lineBreakMode="middleTruncation" translatesAutoresizingMaskIntoConstraints="NO" id="m1Y-7m-LeH">
+                            <button opaque="NO" contentMode="scaleToFill" fixedFrame="YES" contentHorizontalAlignment="center" contentVerticalAlignment="center" buttonType="system" lineBreakMode="middleTruncation" translatesAutoresizingMaskIntoConstraints="NO" id="m1Y-7m-LeH">
                                 <rect key="frame" x="69" y="276" width="119" height="30"/>
                                 <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
                                 <state key="normal" title="Connect to Proxy">
@@ -116,6 +116,8 @@
                         <color key="backgroundColor" red="1" green="1" blue="1" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                     </view>
                     <connections>
+                        <outlet property="ConnectButton" destination="m1Y-7m-LeH" id="Pc5-Cl-uxz"/>
+                        <outlet property="DisconnectButton" destination="Gg2-9O-Z8J" id="lYR-ic-lfm"/>
                         <outlet property="infoText" destination="8jt-IO-eTb" id="TmG-H2-eJY"/>
                         <outlet property="proxyKey" destination="o4Q-bP-8Cn" id="XFh-Qz-86e"/>
                         <outlet property="proxyPort" destination="eLf-oe-8c9" id="f1g-tu-Q5U"/>
