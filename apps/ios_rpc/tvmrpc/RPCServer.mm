@@ -291,6 +291,9 @@ FEventHandler CreateServerEventHandler(NSOutputStream* outputStream, std::string
   handler_ = nullptr;
 }
 
+static void handleConnect(CFSocketRef socket, CFSocketCallBackType type, CFDataRef address, const void *data, void *info) {
+
+};
 
 - (void)startWithHost:(NSString*) host port: (int) port key:(NSString*) key {
   key_ = [key copy];
@@ -301,6 +304,50 @@ FEventHandler CreateServerEventHandler(NSOutputStream* outputStream, std::string
     // process in separate thead with runloop
     worker_thread_ = [[NSThread alloc] initWithBlock:^{
       @autoreleasepool {
+        shouldKeepRunning = YES;
+        [self open];
+        while (shouldKeepRunning && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]);
+      }
+    }];
+  } else if (mode_ == RPCServerMode_Tracker) {
+    worker_thread_ = [[NSThread alloc] initWithBlock:^{
+      @autoreleasepool {
+        // part 1
+        CFSocketRef myipv4cfsock = CFSocketCreate(
+            kCFAllocatorDefault,
+            PF_INET,
+            SOCK_STREAM,
+            IPPROTO_TCP,
+            kCFSocketAcceptCallBack, handleConnect, NULL);
+
+        // part 2
+        struct sockaddr_in sin;
+
+        memset(&sin, 0, sizeof(sin));
+        sin.sin_len = sizeof(sin);
+        sin.sin_family = AF_INET; /* Address family */
+        sin.sin_port = htons(9090); /* Or a specific port */
+        sin.sin_addr.s_addr= INADDR_ANY;
+
+        CFDataRef sincfd = CFDataCreate(
+            kCFAllocatorDefault,
+            (UInt8 *)&sin,
+            sizeof(sin));
+
+        CFSocketSetAddress(myipv4cfsock, sincfd);
+        CFRelease(sincfd);
+
+        // part 3
+        CFRunLoopSourceRef socketsource = CFSocketCreateRunLoopSource(
+            kCFAllocatorDefault,
+            myipv4cfsock,
+            0);
+
+        CFRunLoopAddSource(
+            CFRunLoopGetCurrent(),
+            socketsource,
+            kCFRunLoopDefaultMode);
+
         shouldKeepRunning = YES;
         [self open];
         while (shouldKeepRunning && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]);
