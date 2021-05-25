@@ -17,11 +17,31 @@
  * under the License.
  */
 
-/*!
- * \file TVMRuntime.h
- */
 #import <Foundation/Foundation.h>
 
-#include <tvm/runtime/packed_func.h>
-#include <tvm/runtime/registry.h>
-#include <functional>
+typedef enum {
+  TrackerConnected,
+  TrackerDisconnected,
+  ProxyConnected,
+  ProxyDisconnected,
+  RPCSessionStarted,
+  RPCSessionFiniched
+} RPCServerStatus;
+
+typedef enum {
+  RPCServerMode_Pure,
+  RPCServerMode_Proxy,
+  RPCServerMode_Tracker
+} RPCServerMode;
+
+@protocol RPCServerEvenlListener <NSObject>
+- (void)onError:(NSString*) msg;
+- (void)onStatusChanged:(RPCServerStatus) status;
+@end
+
+@interface RPCServer : NSObject <NSStreamDelegate>
+- (instancetype)initWithMode:(RPCServerMode) mode;
+- (void)setDelegate:(id<RPCServerEvenlListener>) delegate;
+- (void)startWithHost:(NSString*) host port: (int) port key:(NSString*) key;
+- (void)stop;
+@end

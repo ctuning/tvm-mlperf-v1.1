@@ -30,8 +30,8 @@ using std::string;
 
 const char* kUsage = "\n"
 "iOS tvmrpc application supported flags:\n"
-"--tracker_url  - The tracker IP, Default=0.0.0.0\n"
-"--tracker_port - The tracker port, Default=9190\n"
+"--tracker_url  - The tracker/proxy address, Default=0.0.0.0\n"
+"--tracker_port - The tracker/proxy port, Default=9190\n"
 "--port         - The port of the RPC, Default=9090\n"
 "--port_end     - The end search port of the RPC, Default=9099\n"
 "--key          - The key used to identify the device type in tracker. Default=\"\"\n"

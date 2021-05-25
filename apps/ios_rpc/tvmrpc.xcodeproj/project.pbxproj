@@ -26,7 +26,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		016B19C22657B390002E1719 /* RPCServer.mm in Sources */ = {isa = PBXBuildFile; fileRef = 016B19C12657B390002E1719 /* RPCServer.mm */; };
 		01A1DB432652CBA700655BBC /* rpc_args.mm in Sources */ = {isa = PBXBuildFile; fileRef = 01A1DB412652CBA700655BBC /* rpc_args.mm */; };
+		01A9B7B3265BD1FD000D092F /* libtvm_runtime.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 01A9B7B2265BD1FD000D092F /* libtvm_runtime.dylib */; };
+		01A9B7B8265BD307000D092F /* libtvm_runtime.dylib in Embed Libraries */ = {isa = PBXBuildFile; fileRef = 01A9B7B2265BD1FD000D092F /* libtvm_runtime.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		C02637501F1C25E8007247A9 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = C026374F1F1C25E8007247A9 /* main.m */; };
 		C02637531F1C25E8007247A9 /* AppDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = C02637521F1C25E8007247A9 /* AppDelegate.m */; };
 		C02637591F1C25E8007247A9 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = C02637571F1C25E8007247A9 /* Main.storyboard */; };
@@ -48,11 +51,28 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		01A9B7B9265BD307000D092F /* Embed Libraries */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				01A9B7B8265BD307000D092F /* libtvm_runtime.dylib in Embed Libraries */,
+			);
+			name = "Embed Libraries";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		014592702653D06F00125389 /* rpc_env.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = rpc_env.h; sourceTree = "<group>"; };
+		016B19C02657B390002E1719 /* RPCServer.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = RPCServer.h; sourceTree = "<group>"; };
+		016B19C12657B390002E1719 /* RPCServer.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = RPCServer.mm; sourceTree = "<group>"; };
 		01A1DB402652CBA700655BBC /* rpc_args.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = rpc_args.h; sourceTree = "<group>"; };
 		01A1DB412652CBA700655BBC /* rpc_args.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = rpc_args.mm; sourceTree = "<group>"; };
 		01A1DB422652CBA700655BBC /* rpc_server.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = rpc_server.h; sourceTree = "<group>"; };
+		01A9B7B2265BD1FD000D092F /* libtvm_runtime.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libtvm_runtime.dylib; path = "${TVM_BUILD_DIR}/libtvm_runtime.dylib"; sourceTree = "<group>"; };
 		C026374B1F1C25E8007247A9 /* tvmrpc.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = tvmrpc.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C026374F1F1C25E8007247A9 /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
 		C02637511F1C25E8007247A9 /* AppDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppDelegate.h; sourceTree = "<group>"; };
@@ -76,6 +96,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				01A9B7B3265BD1FD000D092F /* libtvm_runtime.dylib in Frameworks */,
 				D7685AD324390EAE00D1469C /* CoreML.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -114,6 +135,8 @@
 		C026374D1F1C25E8007247A9 /* tvmrpc */ = {
 			isa = PBXGroup;
 			children = (
+				016B19C02657B390002E1719 /* RPCServer.h */,
+				016B19C12657B390002E1719 /* RPCServer.mm */,
 				01A1DB402652CBA700655BBC /* rpc_args.h */,
 				01A1DB412652CBA700655BBC /* rpc_args.mm */,
 				014592702653D06F00125389 /* rpc_env.h */,
@@ -153,6 +176,7 @@
 		D7685AD124390EAD00D1469C /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				01A9B7B2265BD1FD000D092F /* libtvm_runtime.dylib */,
 				D7685AD224390EAD00D1469C /* CoreML.framework */,
 			);
 			name = Frameworks;
@@ -169,6 +193,7 @@
 				C02637481F1C25E8007247A9 /* Frameworks */,
 				C02637491F1C25E8007247A9 /* Resources */,
 				C05A2C901F1E683A00D4798B /* ShellScript */,
+				01A9B7B9265BD307000D092F /* Embed Libraries */,
 			);
 			buildRules = (
 			);
@@ -281,6 +306,7 @@
 			files = (
 				C02637691F1C26AF007247A9 /* ViewController.mm in Sources */,
 				01A1DB432652CBA700655BBC /* rpc_args.mm in Sources */,
+				016B19C22657B390002E1719 /* RPCServer.mm in Sources */,
 				C02637531F1C25E8007247A9 /* AppDelegate.m in Sources */,
 				C02637661F1C2690007247A9 /* TVMRuntime.mm in Sources */,
 				C02637501F1C25E8007247A9 /* main.m in Sources */,
