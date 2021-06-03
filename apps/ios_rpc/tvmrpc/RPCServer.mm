@@ -38,6 +38,12 @@
 // TVM internal header to access Magic keys like kRPCMagic and others
 #include "../../../src/runtime/rpc/rpc_endpoint.h"
 
+#define USE_OLD_CPP_RPC
+
+#ifdef USE_OLD_CPP_RPC
+#include "rpc_server.h"
+#endif
+
 namespace tvm {
 namespace runtime {
 
@@ -364,6 +370,7 @@ static std::string getWiFiAddress() {
   url_ = [host copy];
 
   // process in separate thead with runloop
+#ifndef USE_OLD_CPP_RPC
   worker_thread_ = [[NSThread alloc] initWithBlock:^{
     @autoreleasepool {
       [self open];
@@ -375,6 +382,21 @@ static std::string getWiFiAddress() {
       [self notifyState:RPCServerStatus_Stopped];
     }
   }];
+#else
+  // TODO: tracker mode are realized in different manner via sync socket processing (copyed from cpp_rpc)
+     // It has next limitation:
+     //   - disconnect/stop interface is not implemented
+     //   - do not provide info about state changes
+   worker_thread_ = [[NSThread alloc] initWithBlock:^{
+     tvm::runtime::RPCServer server("0.0.0.0", 9090, 9099,
+                                    "('" + std::string(url_.UTF8String) + "', " + std::to_string(port_) + ")",
+                                    key_.UTF8String, "");
+     [self notifyState:RPCServerStatus_Launched];
+     [self notifyState:RPCServerStatus_Connected];  // WA. while real server cnnot report that
+     server.Start();
+     [self notifyState:RPCServerStatus_Stopped];
+   }];
+#endif
   [worker_thread_ start];
 }
 
