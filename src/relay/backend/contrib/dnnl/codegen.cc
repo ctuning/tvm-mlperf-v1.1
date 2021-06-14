@@ -449,6 +449,10 @@ class DNNLJSONSerializer : public backend::contrib::JSONSerializer {
       } else if (name == "dnnl.conv2d_relu") {
         call = GetRootCall(fn->body.as<CallNode>(), 1, {"nn.conv2d", "nn.relu"});
         ICHECK(call->op.as<OpNode>()) << "Not op node";
+      } else if (name == "dnnl.qnn.conv2d_relu") {
+        call = GetRootCall(fn->body.as<CallNode>(), 4,
+            {"qnn.conv2d", "add", "qnn.requantize", "clip", "cast"});
+        ICHECK(call->op.as<OpNode>()) << "Not op node";
       } else {
         LOG(FATAL) << "Unrecognized DNNL pattern: " << name;
       }
@@ -495,6 +499,76 @@ runtime::Module DNNLCompiler(const ObjectRef& ref) {
 }
 
 TVM_REGISTER_GLOBAL("relay.ext.dnnl").set_body_typed(DNNLCompiler);
+
+/*
+ * Spec
+ *
+ * dnnl.conv2d {
+ *  str  activation = "relu" | "gelu" | .... TBD
+ *  bool with_bias =
+ *  sum =
+ * }
+ *
+ * dnnl.qnn.conv2d {
+ *   dnnl.conv2d
+ *
+ *   post_op_scl
+ *   post_op_zp
+ *   out_scl
+ *   out_zp
+ * }
+ * [i8, u8] conv2d -> add[i32] -> out_scale -> relu(scl) ->
+ *   out_scale[x] = data_scale * weight_scale[x]
+ *   relu_scl = 1/data_scale
+ *
+ *
+ * oneDNN
+ * ======
+ *
+ * prim.execute({
+ *   {DNNL_ARG_ATTR_OUTPUT_SCALES, out_scale},   // out scale       | after conv
+ *   {DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST,  // out zero point  | before conv
+ *   {DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC,  // in zero point   | after all postops
+ *
+ *   {DNNL_ARG_ATTR_MULTIPLE_POST_OP(1) | DNNL_ARG_SRC_1, post_relu_scale},   // final rescale
+ *
+ *   {DNNL_ARG_SRC, conv2d_src_memory}}          //
+ *   {DNNL_ARG_WEIGHTS, conv2d_weights_memory},
+ *   {DNNL_ARG_BIAS, conv2d_bias_memory},
+ *   {DNNL_ARG_DST, conv2d_dst_memory}
+ * }
+ *
+ *
+ * for resnet we need:
+ *   conv -> relu -> scale[OC] -> cast[u8]
+ *
+ *
+ * relu scale // set at init stage, single value per tensor
+ *
+ *
+ * dnnl.gnn.conv {
+ *  ==  standard ... ==
+ *  activation: "none", "relu", "gelu"
+ *  with_bias:  true/false
+ *  with_requant: true/false
+ *  sum: 0.0 / 1.0
+ *  sum_first:  true/false
+ *  out_scale: none, [OC], scale
+ *  post_op_scale: none, [OC], scale
+ *
+ *  inputs:
+ *    in 0 : data
+ *    in 1 : weights
+ *    in 2 : bias
+ *    in 3 : output scale, per channel
+ *    // Assumption, no zero point, data is scaled per tensor
+ *
+ *  outputs
+ *    out 0 : data
+ * }
+ *
+ */
+
 
 }  // namespace contrib
 }  // namespace relay

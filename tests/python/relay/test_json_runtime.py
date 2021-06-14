@@ -29,6 +29,8 @@ from tvm.relay import transform
 from tvm.relay.backend import compile_engine
 from tvm.relay.build_module import bind_params_by_name
 from tvm.relay.op.contrib.register import get_pattern_table
+import tvm.relay.qnn
+from tvm.relay.op.contrib.dnnl import partition_for_dnnl
 
 
 def set_func_attr(func, compile_name, symbol_name):
@@ -40,25 +42,31 @@ def set_func_attr(func, compile_name, symbol_name):
 
 
 def check_result(
-    mod, ref_mod, map_inputs, out_shape, tol=1e-5, target="llvm", device=tvm.cpu(), params=None
+    mod, ref_mod, map_inputs, out_shape, tol=1e-5, target="llvm", device=tvm.cpu(), params=None,
+    dtype="float32", ref_result=None, atol=None
 ):
     if sys.platform == "win32":
         print("Skip test on Windows for now")
         return
 
-    # Run the reference result
-    compile_engine.get().clear()
-    with tvm.transform.PassContext(opt_level=3):
-        json, lib, param = relay.build(ref_mod, target=target, params=params)
-    rt_mod = tvm.contrib.graph_executor.create(json, lib, device)
+    if atol is None:
+        atol = tol
 
-    for name, data in map_inputs.items():
-        rt_mod.set_input(name, data)
-    rt_mod.set_input(**param)
-    rt_mod.run()
-    out = tvm.nd.empty(out_shape, device=device)
-    out = rt_mod.get_output(0, out)
-    ref_result = out.numpy()
+    if ref_result is None:
+        # Run the reference result
+        compile_engine.get().clear()
+        with tvm.transform.PassContext(opt_level=3):
+            json, lib, param = relay.build(ref_mod, target=target, params=params)
+        rt_mod = tvm.contrib.graph_executor.create(json, lib, device)
+
+        for name, data in map_inputs.items():
+            rt_mod.set_input(name, data)
+        rt_mod.set_input(**param)
+        rt_mod.run()
+        out = tvm.nd.empty(out_shape, device=device, dtype=dtype)
+        out = rt_mod.get_output(0, out)
+        ref_result = out.numpy()
+        np.set_printoptions(threshold=np.inf)
 
     def check_vm_result():
         compile_engine.get().clear()
@@ -68,7 +76,7 @@ def check_result(
         exe = runtime.vm.Executable.load_exec(code, lib)
         vm = runtime.vm.VirtualMachine(exe, device)
         out = vm.run(**map_inputs)
-        tvm.testing.assert_allclose(out.numpy(), ref_result, rtol=tol, atol=tol)
+        tvm.testing.assert_allclose(out.numpy(), ref_result, rtol=tol, atol=atol)
 
     def check_graph_executor_result():
         compile_engine.get().clear()
@@ -80,9 +88,9 @@ def check_result(
             rt_mod.set_input(name, data)
         rt_mod.set_input(**param)
         rt_mod.run()
-        out = tvm.nd.empty(out_shape, device=device)
+        out = tvm.nd.empty(out_shape, dtype=dtype, device=device)
         out = rt_mod.get_output(0, out)
-        tvm.testing.assert_allclose(out.numpy(), ref_result, rtol=tol, atol=tol)
+        tvm.testing.assert_allclose(out.numpy(), ref_result, rtol=tol, atol=atol)
 
     check_vm_result()
     check_graph_executor_result()
@@ -661,6 +669,106 @@ def test_partial_constant():
     check_result(mod, ref_mod, {"in_2": data2, "in_4": data4}, (10, 10), tol=1e-5)
 
 
+def test_qnn_conv2d():
+    """Test the subgraph with conv2d->add->requantize->relu
+    Have to test:
+        only int8 conv (u8i8 i8i8)
+        with/without relu
+        with/without rescale
+        rescale [{oc}, scl] [{oc}, {oc}] [scl, {oc}]
+        dst out u8 i8 i32 float32
+        bias type u8 i8 i32 float32
+        rescale non const
+        bias nonconst
+        weight nonconst
+    """
+    if not tvm.get_global_func("runtime.DNNLJSONRuntimeCreate", True):
+        print("skip because DNNL codegen is not available")
+        return
+
+    for data_zp, out_zp in (
+            (0, 0),
+            (0, 88),
+            (5, 0),
+            (15, 25),
+    ):
+
+        dtype = "float32"
+        IH, IW = 5, 5
+        KH, KW = 3, 3
+        IC = 16
+        OC = 8
+        d_shape = (1, IH, IW, IC)
+        w_shape = (KH, KW, IC, OC)
+        b_shape = (OC,)
+
+        # NB! to have bit exact out we should take into account that
+        # some implementation may use 16bit intermediate accumulator
+        # It may lead to 16bit accumulator overflow and result mismatch
+        # in compare with ref scoring with using i32 accumulator only.
+        #
+        # Example:
+        # u8*i8 u8*i8 u8*i8 u8*i8
+        #   |     |    |      |
+        #   u8    u8   u8    u8
+        #     \   /     \   /
+        #      i16       i16
+        #         \     /
+        #           i32
+        #
+        # Not the same as:
+        #   res = conv(src.astype(i32), wgh.astype(i32)
+        #
+        use_stored = False
+        if use_stored:
+            data_d = np.load("data_d.npy")
+            # data_d = np.full(d_shape, 5).astype("uint8")
+            data_w = np.load("data_w.npy")
+            data_b = np.load("data_b.npy")
+        else:
+            data_d = np.random.uniform(0, 20, d_shape).astype("uint8")
+            data_w = np.random.uniform(-10, 10, w_shape).astype("int8")
+            data_b = np.random.uniform(-10, 10, b_shape).astype("int32")
+            np.save("data_d", data_d)
+            np.save("data_w", data_w)
+            np.save("data_b", data_b)
+
+        in_d = relay.var("in_1", shape=d_shape, dtype="uint8")
+        in_w = relay.const(data_w, dtype="int8")
+        in_b = relay.const(data_b, dtype="int32")
+        # conv quantize args
+        in_d_zp = relay.const(data_zp, dtype="int32")
+        in_d_sc = relay.const(1/10, dtype=dtype)
+        in_w_zp = relay.const(0.0, dtype="int32")
+        in_w_sc = relay.const(1/10, dtype=dtype)
+        # re quantize
+        rq_in_zp = relay.const(0.0, dtype="int32")
+        rq_in_sc = relay.const(np.random.uniform(0.01, 0.02, (OC,)).astype("float32"), dtype=dtype)
+        rq_out_zp = relay.const(out_zp, dtype="int32")
+        rq_out_sc = relay.const(1/10, dtype=dtype)
+
+        op = in_d
+        op = tvm.relay.nn.pad(op, ((0, 0), (1, 1), (1, 1), (0, 0)), pad_value=data_zp)
+        op = tvm.relay.qnn.op.conv2d(op, in_w, in_d_zp, in_w_zp, in_d_sc, in_w_sc,
+                                     kernel_size=(KH, KW), padding=(0, 0),
+                                     channels=OC, out_dtype="int32",
+                                     data_layout="NHWC", kernel_layout="HWIO")
+        op = tvm.relay.add(op, in_b)
+        op = tvm.relay.qnn.op.requantize(op, rq_in_sc, rq_in_zp, rq_out_sc, rq_out_zp, out_dtype="int32")
+        op = tvm.relay.clip(op, a_min=0.0, a_max=255.0)
+        op = tvm.relay.cast(op, dtype="uint8")
+
+        func = relay.Function([in_d], op)
+        ref_mod = tvm.IRModule.from_expr(func)
+        ref_mod = relay.transform.InferType()(ref_mod)
+
+        mod = partition_for_dnnl(ref_mod)
+
+        # atol=1 means int values should match with +-1 tolerance
+        check_result(mod, ref_mod, {"in_1": data_d}, (1, IH, IW, OC),
+                     tol=1e-10, atol=1, dtype="uint8")
+
+
 if __name__ == "__main__":
     test_conv2d()
     test_add()
@@ -671,3 +779,4 @@ if __name__ == "__main__":
     test_composite()
     test_constant()
     test_partial_constant()
+    test_qnn_conv2d()
