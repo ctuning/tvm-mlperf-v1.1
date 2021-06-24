@@ -62,33 +62,31 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
   }
 
   void Run() override {
-    // Fill in the input buffers.
+    // Bind input buffers
     for (size_t i = 0; i < input_nodes_.size(); ++i) {
       auto eid = EntryID(input_nodes_[i], 0);
       if (std::find(input_var_eid_.begin(), input_var_eid_.end(), eid) == input_var_eid_.end())
         continue;
       // TODO(@apeskov): check if entry_out_mem_[eid] exists
+      //   check is sizes/dtype/offset is matched,
       // TODO(@comaniac): Support other data lengths.
-      size_t offset_in_bytes = entry_out_mem_[eid].second * 4;
+      auto mem = entry_out_mem_[eid].first;
       size_t buffer_size = GetDataSize(*data_entry_[eid]);
-      write_to_dnnl_memory(data_entry_[eid]->data, entry_out_mem_[eid].first, buffer_size,
-                           offset_in_bytes);
+      mem.set_data_handle(data_entry_[eid]->data);
+    }
+    // Bind output buffers
+    for (size_t i = 0; i < outputs_.size(); ++i) {
+      auto eid = EntryID(outputs_[i]);
+      auto mem = entry_out_mem_[eid].first;
+      mem.set_data_handle(data_entry_[eid]->data);
     }
 
     // Invoke the engine through intepreting the stream.
     for (size_t i = 0; i < net_.size(); ++i) {
+      auto prim = net_.at(i);
       net_.at(i).execute(stream_, net_args_.at(i));
     }
     stream_.wait();
-
-    // Read output buffers.
-    for (size_t i = 0; i < outputs_.size(); ++i) {
-      auto eid = EntryID(outputs_[i]);
-      size_t offset_in_bytes = entry_out_mem_[eid].second * 4;
-      size_t buffer_size = GetDataSize(*data_entry_[eid]);
-      read_from_dnnl_memory(data_entry_[eid]->data, entry_out_mem_[eid].first, buffer_size,
-                            offset_in_bytes);
-    }
   }
 
  private:
@@ -302,7 +300,7 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
     return res;
   }
 
-  std::vector<int32_t> calc_out_shift(const JSONGraphNode& node, int KH, int KW, int IC, int OC) {
+  std::vector<int32_t> calc_bias_with_zp(const JSONGraphNode& node, int KH, int KW, int IC, int OC) {
     auto wght_entry = node.GetInputs()[1];
     auto bias_entry = node.GetInputs()[6];
 
@@ -316,6 +314,9 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
     // shft_src = 0
     // shft_dst = rq_out_zp<i32> + rq_in_scl<f32>/rq_out_scl<f32> * (- zp_D - rq_in_zp<i32>)
     //   zp_D = conv(zp_A * QW)
+    //
+    // if we want to move into bias, then:
+    // bias += rq_out_scl<f32>/rq_in_scl<f32> * rq_out_zp<i32> - zp_D - rq_in_zp<i32>
 
     auto zp_A = get_values<int>(data_zero_point_entry, IC);
 
@@ -331,7 +332,10 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
     std::vector<int32_t> res (OC, 0);
 
     for (int i = 0; i < OC; i++) {
-      res[i] = rq_out_zp[i] + static_cast<int32_t>(rq_in_scl[i]/rq_out_scl[i] * (/*bias[i]*/ - rq_in_zp[i] - zp_D[i]));
+      // Version for out scale
+//      res[i] =  rq_out_zp[i] + static_cast<int32_t>(rq_in_scl[i]/rq_out_scl[i] * (/*bias[i]*/ - rq_in_zp[i] - zp_D[i]));
+      // Version for bias update
+      res[i] = bias[i] + static_cast<int32_t>(rq_out_scl[i]/rq_in_scl[i] * rq_out_zp[i]) - zp_D[i] - rq_in_zp[i];
     }
     return res;
   }
@@ -355,7 +359,6 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
     auto node = nodes_[nid];
 
     bool has_relu = false;
-    bool has_bias = true;
 
     // Setup attributes.
     auto data_entry = node.GetInputs()[0];
@@ -413,21 +416,17 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
       attr.set_post_ops(ops);
     }
 
-    // requantize scale
-    // 0-1  : data weight
-    // 2-5  : data_zero_point, weight_zero_point, data_scale, weight_scale,
-    // 6 : bias
-    // 7-10 : input_scale, input_zero_point, output_scale, output_zero_point
-    // output rescale
+    // out rescale
     auto out_scale = calc_out_scale(node, KH, KW, IC, OC);
     attr.set_output_scales(1 << 1, out_scale);
 
     // out zero point
-    auto out_zero_point = calc_out_shift(node, KH, KW, IC, OC);
-    dnnl::memory out_zp_mem({{OC}, dt::s32, tag::a}, engine_);
+    // NB! There is a limitation of DNNL. 1<<1 mask is not supported for
+    //     zero point specification. Have to inject it into bias values
+    auto out_zero_point = calc_bias_with_zp(node, KH, KW, IC, OC);
+    dnnl::memory conv2d_bias_memory({{OC}, dt::s32, tag::a}, engine_);
     std::copy(out_zero_point.begin(), out_zero_point.end(),
-              static_cast<int32_t*>(out_zp_mem.get_data_handle()));
-    attr.set_zero_points(DNNL_ARG_DST, 1<<1, {DNNL_RUNTIME_S32_VAL});
+              static_cast<int32_t*>(conv2d_bias_memory.get_data_handle()));
 
     auto conv2d_prim_desc = dnnl::convolution_forward::primitive_desc(conv_desc, attr, engine_);
 
@@ -448,16 +447,6 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
     auto w_reorder = dnnl::reorder(weights_memory, conv2d_weights_memory);
     w_reorder.execute(stream_, weights_memory, conv2d_weights_memory);
 
-    // Bias memory.
-    dnnl::memory conv2d_bias_memory;
-    if (has_bias) {
-      auto bias_entry = node.GetInputs()[6];
-      conv2d_bias_memory = BindDNNLMemory(bias_entry, {bias_dims, dt::s32, tag::x});
-    } else {
-      std::vector<float> bias(OC, 0);
-      write_to_dnnl_memory(bias.data(), conv2d_bias_memory, OC * sizeof(float));
-    }
-
     // Output memory.
     JSONGraphNodeEntry out_entry(nid, 0);
     auto conv2d_dst_memory = BindDNNLMemory(out_entry, conv2d_prim_desc.dst_desc());
@@ -467,7 +456,6 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
     net_args_.push_back({{DNNL_ARG_SRC, conv2d_src_memory},
                          {DNNL_ARG_WEIGHTS, conv2d_weights_memory},
                          {DNNL_ARG_BIAS, conv2d_bias_memory},
-                         {DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST, out_zp_mem},
                          {DNNL_ARG_DST, conv2d_dst_memory}});
   }
 
