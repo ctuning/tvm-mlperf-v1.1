@@ -290,6 +290,9 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
     if (IsReshape(op)) {
       ICHECK_EQ(args.size(), 1U);
       ReuseInputToken(op, args[0]);
+    } else if (IsDNNLWithSum(op)) {
+      ICHECK_EQ(args.size(), 2U);
+      ReuseInputToken(op, args[1]);
     } else {
       // create token for the call node.
       CreateToken(op, true);
@@ -319,6 +322,22 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
   static bool IsReshape(const CallNode* call) {
     if (const auto* fn = call->op.as<FunctionNode>()) {
       return fn->HasNonzeroAttr(attr::kReshapeOnly);
+    }
+    return false;
+  }
+  /*!
+   * \brief The call is a composite node with dnnl.conv2d_sum pattern
+   * \param call The call to be checked.
+   * \return the check result.
+   */
+  static bool IsDNNLWithSum(const CallNode* call) {
+    if (const auto* fn = call->op.as<FunctionNode>()) {
+      if (const auto* fn_b = fn->body.as<CallNode>()) {
+        if (const auto* fn_b_fn = fn_b->op.as<FunctionNode>()) {
+          auto comp = fn_b_fn->GetAttr<String>(attr::kComposite);
+          return comp && comp.value() == "dnnl.qnn.conv2d_sum";
+        }
+      }
     }
     return false;
   }
