@@ -67,8 +67,8 @@ def _register_external_op_helper(op_name, supported=True):
     """The helper function to indicate that a given operator can be supported
     by DNNL.
 
-    Paramters
-    ---------
+    Parameters
+    ----------
     op_name : Str
         The name of operator that will be registered.
 
@@ -89,7 +89,6 @@ _register_external_op_helper("nn.batch_norm")
 _register_external_op_helper("nn.conv2d")
 _register_external_op_helper("nn.dense")
 _register_external_op_helper("nn.relu")
-# _register_external_op_helper("qnn.conv2d")
 # _register_external_op_helper("add")
 _register_external_op_helper("subtract")
 _register_external_op_helper("multiply")
@@ -107,7 +106,7 @@ def make_pattern(with_bias=True):
     return is_op("nn.relu")(conv_out)
 
 
-def make_pattern_qnn_conv2d():
+def make_pattern_qnn_conv2d(with_sum=False):
     weight = wildcard()
     bias = wildcard()
 
@@ -118,6 +117,10 @@ def make_pattern_qnn_conv2d():
     pat = is_op("qnn.requantize")(pat, wildcard(), wildcard(), wildcard(), wildcard())
     pat = is_op("clip")(pat)
     pat = is_op("cast")(pat)
+    if with_sum is True:
+        pat = is_op("qnn.add")(pat, wildcard(), wildcard(), wildcard(), wildcard(),
+                               wildcard(), wildcard(), wildcard())
+        pat = is_op("clip")(pat)
 
     return pat
 
@@ -126,6 +129,11 @@ def make_pattern_qnn_conv2d():
 def pattern_table():
     conv2d_bias_relu_pat = ("dnnl.conv2d_bias_relu", make_pattern(with_bias=True))
     conv2d_relu_pat = ("dnnl.conv2d_relu", make_pattern(with_bias=False))
-    conv2d_qnn_pat = ("dnnl.qnn.conv2d_relu", make_pattern_qnn_conv2d())
-    dnnl_patterns = [conv2d_bias_relu_pat, conv2d_relu_pat, conv2d_qnn_pat]
+    conv2d_qnn_sum_pat = ("dnnl.qnn.conv2d_sum", make_pattern_qnn_conv2d(with_sum=True))
+    conv2d_qnn_pat = ("dnnl.qnn.conv2d", make_pattern_qnn_conv2d())
+    dnnl_patterns = [conv2d_bias_relu_pat,
+                     conv2d_relu_pat,
+                     conv2d_qnn_sum_pat,
+                     conv2d_qnn_pat
+                     ]
     return dnnl_patterns

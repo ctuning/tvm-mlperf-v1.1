@@ -107,8 +107,10 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
           Conv2d(nid, true, false);
         } else if ("dnnl.conv2d_bias_relu" == op_name) {
           Conv2d(nid, true, true);
-        } else if ("dnnl.qnn.conv2d_relu" == op_name) {
+        } else if ("dnnl.qnn.conv2d" == op_name) {
           QnnConv2d(nid);
+        } else if ("dnnl.qnn.conv2d_sum" == op_name) {
+          QnnConv2dSum(nid);
         } else if ("nn.dense" == op_name) {
           Dense(nid);
         } else if ("nn.batch_norm" == op_name) {
@@ -355,10 +357,183 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
   }
 
 
-  void QnnConv2d(const size_t& nid) {
-    auto node = nodes_[nid];
+/*
+ * Case ConvSumRelu
+ * ================
+ * Original relay representation:
+ *    in1<u8>    in2<u8>  w<i8>  b<i32>
+ *    qnn.conv<i32>(in1, w, conv_i_zp, conv_i_zcl, conv_w_zp, conv_w_scl)
+ *    add<i32>(conv, b)
+ *    qnn.reqaunt<i32>(add, rq_i_zp, rq_i_scl, rq_o_zp, rq_o_scl)
+ *    clip<i32>(reqaunt, 0, 255)
+ *    cast<u8>(clip)
+ *    qnn.add(cast, in2, lhs_scl, lhs_zp, rhs_scl, rhs_zp, output_scl, output_zp)
+ *
+ *    totally have 17 inputs:
+ *       in1, in2, w, b
+ *       conv_i_zp(==0 ??), conv_i_zcl(ignored), conv_w_zp(==0), conv_w_scl(ignored)
+ *       rq_i_zp(==0 ??), rq_i_scl, rq_o_zp, rq_o_scl
+ *       lhs_scl, lhs_zp, rhs_scl, rhs_zp, output_scl, output_zp
+ *    Some of then SHOULD be a zero, some of them ignored
+ *
+ *    (conv(in1, w) + bias)*  rq_i_scl / rq_o_scl + rq_o_zp  //  and CLIP!!! can we ignore it??
+ *                                                           //  or may be eltwise with clip??
+ *
+ *    (((conv(in1, w) + bias)*  rq_i_scl / rq_o_scl + rq_o_zp  - lhs_zp ) * lhs_scl
+ *      + (in2 - rhs_zp) * rhs_scl ) / output_scl + output_zp =
+ *
+ *    conv(in1, w) * rq_i_scl / rq_o_scl * lhs_scl / output_scl +
+ *    bias * rq_i_scl / rq_o_scl * lhs_scl / output_scl +
+ *    (rq_o_zp  - lhs_zp) * lhs_scl / output_scl +
+ *    (in2 - rhs_zp) * rhs_scl / output_scl +
+ *    output_zp
+ * DNNL suggest next function:
+ *    conv2d with post op sum + out_scale + out_zp
+ *
+ *     dst = ( clip(alfa * (conv(i<u8>, w<i8>)) + b<i32>) + beta * in2<u8> ) + gamma<i32>
+ *
+ *   Have to calc alfa, beta, gamma and bias update
+ *     alfa - to meet final scale
+ *     beta - to align in2 scale with final scale (??? is it accurate)
+ *     gama - to meet final zero point
+ *     clip_low  - ??
+ *     clip_high - ??
+ *     originally : clip (rq_i_scl / rq_o_scl (conv(i<u8>, w<i8>) + bias) , -lhs_scl / output_scl * rq_out_zp, lhs_scl / output_scl (255-rq_out_zp))
+ *
+ *    alfa = rq_i_scl / rq_o_scl * lhs_scl / output_scl
+ *    beta = rhs_scl / output_scl
+ *    gamma = output_zp  - rhs_zp * rhs_scl / output_scl + (rq_o_zp  - lhs_zp) * lhs_scl / output_scl
+ *            // or may be move to bias??
+ *    clip_low = -lhs_scl / output_scl * rq_out_zp
+ *    clip_high = lhs_scl / output_scl (255-rq_out_zp)
+ */
+std::tuple<
+      std::vector<float>,
+      std::vector<float>,
+      std::vector<int32_t>,
+      float,
+      float
+  > calc_abg_for_sum(const JSONGraphNode& node, int OC) {
+    std::vector<float> alfa(OC), beta(OC);
+    std::vector<int32_t> gamma(OC);
+    // 0-1 in1 weight
+    // 2-5 conv
+    // 6 - bias
+    // 7-10 - requant args
+    // 11 - in2
+    // 12-17 - qnn add args
 
-    bool has_relu = false;
+    auto in1_entry = node.GetInputs()[0];   // not used
+    auto wght_entry = node.GetInputs()[1];  // not used
+    // conv quant args
+    auto data_zp_entry = node.GetInputs()[2];  // should be zero
+    auto wght_zp_entry = node.GetInputs()[3];  // should be zero
+    auto data_scl_entry = node.GetInputs()[4]; // not used
+    auto wght_scl_entry = node.GetInputs()[5]; // not used
+    // bias
+    auto bias_entry = node.GetInputs()[6];
+    // requant args
+    auto rq_i_scl_entry = node.GetInputs()[7];
+    auto rq_i_zp_entry = node.GetInputs()[8];  // should be zero
+    auto rq_o_scl_entry = node.GetInputs()[9];
+    auto rq_o_zp_entry = node.GetInputs()[10];
+    // sum_in2
+    auto sum_in2_entry = node.GetInputs()[11];
+    // qnn add quant args
+    auto lhs_scl_entry = node.GetInputs()[12];
+    auto lhs_zp_entry = node.GetInputs()[13];
+    auto rhs_scl_entry = node.GetInputs()[14];
+    auto rhs_zp_entry = node.GetInputs()[15];
+    auto out_scl_entry = node.GetInputs()[16];
+    auto out_zp_entry = node.GetInputs()[17];
+
+
+    auto rq_i_scl = get_values<float>(rq_i_scl_entry, OC);
+    auto rq_o_scl = get_values<float>(rq_o_scl_entry, OC);
+    auto lhs_scl = get_values<float>(lhs_scl_entry, OC);
+    auto rhs_scl = get_values<float>(rhs_scl_entry, OC);
+    auto out_scl = get_values<float>(out_scl_entry, OC);
+
+    auto rq_o_zp = get_values<int32_t>(rq_o_zp_entry, OC);
+    auto out_zp = get_values<int32_t>(out_zp_entry, OC);
+    auto rhs_zp = get_values<int32_t>(rhs_zp_entry, OC);
+    auto lhs_zp = get_values<int32_t>(lhs_zp_entry, OC);
+
+    // alfa = rq_i_scl / rq_o_scl * lhs_scl / out_scl
+    // beta = rhs_scl / output_scl
+    // gamma = out_zp  - rhs_zp * rhs_scl / out_scl + (rq_o_zp  - lhs_zp) * lhs_scl / out_scl
+
+    for (int i = 0; i < OC; i++) {
+      alfa[i] = rq_i_scl[i] / rq_o_scl[i] * lhs_scl[i] / out_scl[i];
+      beta[i] = rhs_scl[i] / out_scl[i];
+      gamma[i] = out_zp[i]  - rhs_zp[i] * rhs_scl[i] / out_scl[i] + (rq_o_zp[i]  - lhs_zp[i])
+                                                                  * lhs_scl[i] / out_scl[i];
+    }
+
+    float clip_low = - lhs_scl[0] / out_scl[0] * rq_o_zp[0];
+    float clip_high = lhs_scl[0] / out_scl[0] * (255 - rq_o_zp[0]);
+
+    return {alfa, beta, gamma, clip_low, clip_high};
+  }
+
+  /**
+   *
+   *
+   *
+   * Case ConvSumRelu
+   * ================
+   * Original relay representation:
+   *    in1<u8>    in2<u8>  w<i8>  b<i32>
+   *    qnn.conv<i32>(in1, w, conv_i_zp, conv_i_zcl, conv_w_zp, conv_w_scl)
+   *    add<i32>(conv, b)
+   *    qnn.reqaunt<i32>(add, rq_i_zp, rq_i_scl, rq_o_zp, rq_o_scl)
+   *    clip<i32>(reqaunt, 0, 255)
+   *    cast<u8>(clip)
+   *    qnn.add(cast, in2, lhs_scl, lhs_zp, rhs_scl, rhs_zp, output_scl, output_zp)
+   *
+   *    totally have 17 inputs:
+   *       in1, in2, w, b
+   *       conv_i_zp(==0 ??), conv_i_zcl(ignored), conv_w_zp(==0), conv_w_scl(ignored)
+   *       rq_i_zp(==0 ??), rq_i_scl, rq_o_zp, rq_o_scl
+   *       lhs_scl, lhs_zp, rhs_scl, rhs_zp, output_scl, output_zp
+   *    Some of then SHOULD be a zero, some of them ignored
+   *
+   *    (conv(in1, w) + bias)*  rq_i_scl / rq_o_scl + rq_o_zp  //  and CLIP!!! can we ignore it??
+   *                                                           //  or may be eltwise with clip??
+   *
+   *    (((conv(in1, w) + bias)*  rq_i_scl / rq_o_scl + rq_o_zp  - lhs_zp ) * lhs_scl
+   *      + (in2 - rhs_zp) * rhs_scl ) / output_scl + output_zp =
+   *
+   *    conv(in1, w) * rq_i_scl / rq_o_scl * lhs_scl / output_scl +
+   *    bias * rq_i_scl / rq_o_scl * lhs_scl / output_scl +
+   *    (rq_o_zp  - lhs_zp) * lhs_scl / output_scl +
+   *    (in2 - rhs_zp) * rhs_scl / output_scl +
+   *    output_zp
+   *
+   *
+   *
+   *
+   *
+   * DNNL suggest next function:
+   *    conv2d with post op sum + out_scale + out_zp
+   *
+   *     dst = ( alfa * (conv(i<u8>, w<i8>) + b<i32>) + beta * in2<u8> ) + gamma<i32>
+   *
+   *   Have to calc alfa, beta, gamma and bias update
+   *     alfa - to meet final scale
+   *     beta - to align in2 scale with final scale (??? is it accurate)
+   *     gama - to meet final zero point
+   *
+   *    alfa = rq_i_scl / rq_o_scl * lhs_scl / output_scl
+   *    beta = rhs_scl / output_scl
+   *    gamma = output_zp  - rhs_zp * rhs_scl / output_scl + (rq_o_zp  - lhs_zp) * lhs_scl / output_scl
+   *            // or may be move to bias??
+   *
+   *
+   * @param nid
+   */
+  void QnnConv2d(const size_t& nid, bool with_sum = false) {
+    auto node = nodes_[nid];
 
     // Setup attributes.
     auto data_entry = node.GetInputs()[0];
@@ -410,11 +585,11 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
 
     // Enable ReLU
     dnnl::primitive_attr attr;
-    if (has_relu) {
-      dnnl::post_ops ops;
-      ops.append_eltwise(1.f, dnnl::algorithm::eltwise_relu, 0.f, 0.f);
-      attr.set_post_ops(ops);
-    }
+//    if (has_relu) {
+//      dnnl::post_ops ops;
+//      ops.append_eltwise(1.f, dnnl::algorithm::eltwise_relu, 0.f, 0.f);
+//      attr.set_post_ops(ops);
+//    }
 
     // out rescale
     auto out_scale = calc_out_scale(node, KH, KW, IC, OC);
@@ -450,6 +625,119 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
     // Output memory.
     JSONGraphNodeEntry out_entry(nid, 0);
     auto conv2d_dst_memory = BindDNNLMemory(out_entry, conv2d_prim_desc.dst_desc());
+
+    // Bind memory buffers.
+    net_.push_back(conv);
+    net_args_.push_back({{DNNL_ARG_SRC, conv2d_src_memory},
+                         {DNNL_ARG_WEIGHTS, conv2d_weights_memory},
+                         {DNNL_ARG_BIAS, conv2d_bias_memory},
+                         {DNNL_ARG_DST, conv2d_dst_memory}});
+  }
+
+  void QnnConv2dSum(const size_t& nid) {
+    auto node = nodes_[nid];
+
+    // Setup attributes.
+    auto data_entry = node.GetInputs()[0];
+    auto weight_entry = node.GetInputs()[1];
+    auto bias_entry = node.GetInputs()[6];
+    auto sum_input_entry = node.GetInputs()[11];
+    dnnl::memory::dims input_shape = nodes_[data_entry.id_].GetOpShape()[data_entry.index_];
+    dnnl::memory::dims weight_shape = nodes_[weight_entry.id_].GetOpShape()[weight_entry.index_];
+    std::vector<std::string> str_strides = node.GetAttr<std::vector<std::string>>("strides");
+    std::vector<std::string> str_padding = node.GetAttr<std::vector<std::string>>("padding");
+    dnnl::memory::dim groups = std::stoi(node.GetAttr<std::vector<std::string>>("groups")[0]);
+
+    dnnl::memory::dim N = input_shape[0],       // batch size
+    IH = input_shape[1],                    // input channels
+    IW = input_shape[2],                    // input height
+    IC = input_shape[3],                    // input width
+    KH = weight_shape[0],                   // output channels
+    KW = weight_shape[1],                   // weight height
+    OC = weight_shape[3],                   // weight width
+    PH_L = std::stoi(str_padding[1]),       // height padding: left
+    PH_R = std::stoi(str_padding[3]),       // height padding: right
+    PW_L = std::stoi(str_padding[0]),       // width padding: left
+    PW_R = std::stoi(str_padding[2]),       // width padding: right
+    SH = std::stoi(str_strides[0]),         // height-wise stride
+    SW = std::stoi(str_strides[0]),         // weight-wise stride
+    OH = (IH - KH + PH_L + PH_R) / SH + 1,  // output height
+    OW = (IW - KW + PW_L + PW_R) / SW + 1;  // output width
+
+    // Memory shapes.
+    dnnl::memory::dims src_dims = {N, IC, IH, IW};
+    dnnl::memory::dims weights_dims = {OC, IC, KH, KW};
+    if (groups > 1) {
+      weights_dims = {groups, 1, IC / groups, KH, KW};
+    }
+    dnnl::memory::dims bias_dims = {OC};
+    dnnl::memory::dims dst_dims = {N, OC, OH, OW};
+    dnnl::memory::dims strides_dims = {SH, SW};
+    dnnl::memory::dims padding_dims_l = {PH_L, PW_L};
+    dnnl::memory::dims padding_dims_r = {PH_R, PW_R};
+
+    // Memory descriptions.
+    auto conv_src_md = dnnl::memory::desc(src_dims, dt::u8, tag::nhwc);
+    auto conv_weights_md = dnnl::memory::desc(weights_dims, dt::s8, tag::any);
+    auto conv_bias_md = dnnl::memory::desc(bias_dims, dt::s32, tag::any);
+    auto conv_dst_md = dnnl::memory::desc(dst_dims, dt::u8, tag::nhwc);
+
+    // Covn2d description.
+    auto conv_desc = dnnl::convolution_forward::desc(
+        dnnl::prop_kind::forward_inference, dnnl::algorithm::convolution_direct, conv_src_md,
+        conv_weights_md, conv_bias_md, conv_dst_md, strides_dims, padding_dims_l, padding_dims_r);
+
+    // Enable ReLU
+    dnnl::primitive_attr attr;
+
+
+    std::vector<float> alfa, beta;
+    std::vector<int32_t> gamma;
+    float clip_low, clip_high;
+
+    std::tie(alfa, beta, gamma, clip_low, clip_high) = calc_abg_for_sum(node, OC);
+    // out rescale
+    attr.set_output_scales(1 << 1, alfa);
+    attr.set_zero_points(DNNL_ARG_DST, 0, {gamma[0]}); // TODO: check if it's broadcasted scalar
+    dnnl::post_ops pops;
+    pops.append_eltwise(1.0, dnnl::algorithm::eltwise_clip, clip_low, clip_high);
+    pops.append_sum(beta[0], dnnl::memory::data_type::u8);
+
+    attr.set_post_ops(pops);
+
+    auto conv2d_prim_desc = dnnl::convolution_forward::primitive_desc(conv_desc, attr, engine_);
+    auto conv = dnnl::convolution_forward(conv2d_prim_desc);
+
+    // Data memory.
+    ICHECK_EQ(node.GetAttr<std::vector<std::string>>("data_layout")[0], "NHWC");
+    auto conv2d_src_memory = BindDNNLMemory(data_entry, {src_dims, dt::u8, tag::nhwc});
+
+    // Weight memory is in constants.
+    ICHECK_EQ(node.GetAttr<std::vector<std::string>>("kernel_layout")[0], "HWIO");
+    auto weights_memory =
+        BindDNNLMemory(weight_entry, {weights_dims, dt::s8, (groups > 1) ? tag::hwigo : tag::hwio});
+
+    auto suggested_wgh_desc = conv2d_prim_desc.weights_desc();
+    dnnl::memory conv2d_weights_memory = dnnl::memory(suggested_wgh_desc, engine_);
+    auto w_reorder = dnnl::reorder(weights_memory, conv2d_weights_memory);
+    w_reorder.execute(stream_, weights_memory, conv2d_weights_memory);
+
+    // Weight memory is in constants.
+    auto conv2d_bias_memory =
+        BindDNNLMemory(bias_entry, {{OC}, dt::s32, tag::a});
+
+    auto conv2d_sum_input_memory =
+        BindDNNLMemory(sum_input_entry, {dst_dims, dt::u8, tag::nhwc});
+    // Output memory.
+    JSONGraphNodeEntry out_entry(nid, 0);
+    auto conv2d_dst_memory = BindDNNLMemory(out_entry, conv2d_prim_desc.dst_desc());
+
+    // TODO: fake copy right here
+//    {
+//      net_.push_back(dnnl::reorder(conv2d_sum_input_memory, conv2d_dst_memory));
+//      net_args_.push_back({{DNNL_ARG_SRC, conv2d_sum_input_memory},
+//                           {DNNL_ARG_DST, conv2d_dst_memory}});
+//    }
 
     // Bind memory buffers.
     net_.push_back(conv);
