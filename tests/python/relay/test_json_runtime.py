@@ -769,6 +769,112 @@ def test_qnn_conv2d():
                      tol=1e-10, atol=1, dtype="uint8")
 
 
+def test_qnn_conv2d_sum():
+    """Test the subgraph with conv2d->add->requantize->relu
+    Have to test:
+        only int8 conv (u8i8 i8i8)
+        with/without relu
+        with/without rescale
+        rescale [{oc}, scl] [{oc}, {oc}] [scl, {oc}]
+        dst out u8 i8 i32 float32
+        bias type u8 i8 i32 float32
+        rescale non const
+        bias nonconst
+        weight nonconst
+    """
+    if not tvm.get_global_func("runtime.DNNLJSONRuntimeCreate", True):
+        print("skip because DNNL codegen is not available")
+        return
+
+    for data_zp, out_zp in (
+            (0, 0),
+            # (0, 88),
+            # (5, 0),
+            # (15, 25),
+    ):
+
+        dtype = "float32"
+        IH, IW = 5, 5
+        KH, KW = 3, 3
+        IC = 16
+        OC = 8
+        d_shape = (1, IH, IW, IC)
+        w_shape = (KH, KW, IC, OC)
+        b_shape = (OC,)
+
+        # in1 5 : scl=0.2  zp=0      // 1.0 in float
+        # W 2 : scl=0.1  zp=0 (+/-)  // result 16x9x0.2 = +/-28.8   scl=0.02  zp=50
+        # B 5 : // 0.5 in float
+        # rescale // in scl=0.02 zp=50 , out scl=0.1 zp = 10
+        # in2 25 : scl=0.3 zp=15     // 3.0 in float
+        #
+
+        use_stored = False
+        if use_stored:
+            data_in1 = np.load("data_in1.npy")
+            data_in2 = np.load("data_in2.npy")
+            data_w = np.load("data_w.npy")
+            data_b = np.load("data_b.npy")
+        else:
+            data_in1 = np.full(d_shape, 5).astype("uint8")
+            data_in2 = np.full((1, 5, 5, 8), 25).astype("uint8")
+            data_w = np.full(w_shape, 2).astype("int8")
+            data_w[:, :, :, ::2] *= -1
+            data_b = np.full(b_shape, 5).astype("int32")
+            # data_in1 = np.random.uniform(0, 20, d_shape).astype("uint8")
+            # data_in2 = np.random.uniform(0, 20, (1, 5, 5, 8)).astype("uint8")
+            # data_w = np.random.uniform(-10, 10, w_shape).astype("int8")
+            # data_b = np.random.uniform(-10, 10, b_shape).astype("int32")
+            # np.save("data_in1", data_in1)
+            # np.save("data_in2", data_in2)
+            # np.save("data_w", data_w)
+            # np.save("data_b", data_b)
+
+        in_1 = relay.var("in_1", shape=d_shape, dtype="uint8")
+        in_2 = relay.var("in_2", shape=(1, 5, 5, 8), dtype="uint8")
+        in_w = relay.const(data_w, dtype="int8")
+        in_b = relay.const(data_b, dtype="int32")
+        # qnn conv quantize args
+        in_d_zp = relay.const(0, dtype="int32")
+        in_d_sc = relay.const(0.2, dtype=dtype)
+        in_w_zp = relay.const(0, dtype="int32")
+        in_w_sc = relay.const(0.1, dtype=dtype)
+        # re quantize
+        rq_in_zp = relay.const(0.0, dtype="int32")
+        rq_in_sc = relay.const(0.02, dtype=dtype)
+        rq_out_zp = relay.const(10, dtype="int32")
+        rq_out_sc = relay.const(0.1, dtype=dtype)
+        # qnn add quant args
+        lhs_zp = relay.const(10, dtype="int32")
+        lhs_scl = relay.const(0.1, dtype="float32")
+        rhs_zp = relay.const(15, dtype="int32")
+        rhs_scl = relay.const(0.3, dtype="float32")
+        out_zp = relay.const(0.0, dtype="int32")
+        out_scl = relay.const(0.2, dtype="float32")
+
+        op = in_1
+        op = tvm.relay.qnn.op.conv2d(op, in_w, in_d_zp, in_w_zp, in_d_sc, in_w_sc,
+                                     kernel_size=(KH, KW), padding=(1, 1),
+                                     channels=OC, out_dtype="int32",
+                                     data_layout="NHWC", kernel_layout="HWIO")
+        op = tvm.relay.add(op, in_b)
+        op = tvm.relay.qnn.op.requantize(op, rq_in_sc, rq_in_zp, rq_out_sc, rq_out_zp, out_dtype="int32")
+        op = tvm.relay.clip(op, a_min=0.0, a_max=255.0)
+        op = tvm.relay.cast(op, dtype="uint8")
+        op = tvm.relay.qnn.op.add(op, in_2, lhs_scl, lhs_zp, rhs_scl, rhs_zp, out_scl, out_zp)
+        op = tvm.relay.clip(op, a_min=0.0, a_max=255.0)
+
+        func = relay.Function([in_1, in_2], op)
+        ref_mod = tvm.IRModule.from_expr(func)
+        ref_mod = relay.transform.InferType()(ref_mod)
+
+        mod = partition_for_dnnl(ref_mod)
+
+        # atol=1 means int values should match with +-1 tolerance
+        check_result(mod, ref_mod, {"in_1": data_in1, "in_2": data_in2}, (1, IH, IW, OC),
+                     tol=1e-10, atol=2, dtype="uint8")
+
+
 if __name__ == "__main__":
     test_conv2d()
     test_add()
@@ -780,3 +886,4 @@ if __name__ == "__main__":
     test_constant()
     test_partial_constant()
     test_qnn_conv2d()
+    test_qnn_conv2d_sum()
