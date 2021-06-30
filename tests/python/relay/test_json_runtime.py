@@ -875,6 +875,67 @@ def test_qnn_conv2d_sum():
                      tol=1e-10, atol=2, dtype="uint8")
 
 
+#  TODO(@apeskov): have to check
+#    * non scalar wght_zp
+#    * non zero data_zp
+#    * with activation
+#    * with sum
+def test_qnn_dense():
+    """
+    :return:
+    """
+
+    for data_zp, out_zp in (
+            (0, 0),
+            (0, 88),
+            (5, 0),
+            (15, 25),
+    ):
+        dtype = "float32"
+        NB = 1
+        IC = 16
+        OC = 8
+        d_shape = (NB, IC)
+        w_shape = (OC, IC)
+        b_shape = (OC,)
+
+        data_i = np.random.uniform(0, 30, d_shape).astype("uint8")
+        data_w = np.random.uniform(-10, 10, w_shape).astype("int8")
+        data_b = np.random.uniform(-10, 10, b_shape).astype("int32")
+
+        in_d = relay.var("in", shape=d_shape, dtype="uint8")
+        in_w = relay.const(data_w, dtype="int8")
+        in_b = relay.const(data_b, dtype="int32")
+        # qnn dense quantize args
+        in_d_zp = relay.const(data_zp, dtype="int32")
+        in_d_sc = relay.const(0.1, dtype=dtype)
+        in_w_zp = relay.const(0, dtype="int32")
+        in_w_sc = relay.const(0.12, dtype=dtype)
+        # re quantize
+        rq_in_zp = relay.const(0.0, dtype="int32")
+        rq_in_sc = relay.const(0.02, dtype=dtype)
+        rq_out_zp = relay.const(out_zp, dtype="int32")
+        rq_out_sc = relay.const(0.1, dtype=dtype)
+
+        op = in_d
+        op = tvm.relay.qnn.op.dense(op, in_w, in_d_zp, in_w_zp, in_d_sc, in_w_sc,
+                                    units=OC, out_dtype="int32")
+        op = tvm.relay.add(op, in_b)
+        op = tvm.relay.qnn.op.requantize(op, rq_in_sc, rq_in_zp, rq_out_sc, rq_out_zp, out_dtype="int32")
+        op = tvm.relay.clip(op, a_min=0.0, a_max=255.0)
+        op = tvm.relay.cast(op, dtype="uint8")
+
+        func = relay.Function([in_d], op)
+        ref_mod = tvm.IRModule.from_expr(func)
+        ref_mod = relay.transform.InferType()(ref_mod)
+
+        mod = partition_for_dnnl(ref_mod)
+
+        # atol=1 means int values should match with +-1 tolerance
+        check_result(mod, ref_mod, {"in": data_i}, (1, OC),
+                     tol=1e-10, atol=1, dtype="uint8")
+
+
 if __name__ == "__main__":
     test_conv2d()
     test_add()
@@ -887,3 +948,4 @@ if __name__ == "__main__":
     test_partial_constant()
     test_qnn_conv2d()
     test_qnn_conv2d_sum()
+    test_qnn_dense()
