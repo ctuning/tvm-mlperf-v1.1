@@ -125,15 +125,36 @@ def make_pattern_qnn_conv2d(with_sum=False):
     return pat
 
 
+def make_pattern_qnn_dense(with_sum=False):
+    weight = wildcard()
+    bias = wildcard()
+
+    # TODO(@apeskov): additional check applicability of this pattern
+    pat = wildcard()
+    pat = is_op("qnn.dense")(pat, weight, wildcard(), wildcard(), wildcard(), wildcard())
+    pat = is_op("add")(pat, bias)
+    pat = is_op("qnn.requantize")(pat, wildcard(), wildcard(), wildcard(), wildcard())
+    pat = is_op("clip")(pat)
+    pat = is_op("cast")(pat)
+    if with_sum is True:
+        pat = is_op("qnn.add")(pat, wildcard(), wildcard(), wildcard(), wildcard(),
+                               wildcard(), wildcard(), wildcard())
+        pat = is_op("clip")(pat)
+
+    return pat
+
+
 @register_pattern_table("dnnl")
 def pattern_table():
     conv2d_bias_relu_pat = ("dnnl.conv2d_bias_relu", make_pattern(with_bias=True))
     conv2d_relu_pat = ("dnnl.conv2d_relu", make_pattern(with_bias=False))
     conv2d_qnn_sum_pat = ("dnnl.qnn.conv2d_sum", make_pattern_qnn_conv2d(with_sum=True))
     conv2d_qnn_pat = ("dnnl.qnn.conv2d", make_pattern_qnn_conv2d())
+    dense_qnn_pat = ("dnnl.qnn.dense", make_pattern_qnn_dense())
     dnnl_patterns = [conv2d_bias_relu_pat,
                      conv2d_relu_pat,
                      conv2d_qnn_sum_pat,
-                     conv2d_qnn_pat
+                     conv2d_qnn_pat,
+                     dense_qnn_pat,
                      ]
     return dnnl_patterns

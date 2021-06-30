@@ -111,6 +111,8 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
           QnnConv2d(nid);
         } else if ("dnnl.qnn.conv2d_sum" == op_name) {
           QnnConv2dSum(nid);
+        } else if ("dnnl.qnn.dense" == op_name) {
+          QnnDense(nid);
         } else if ("nn.dense" == op_name) {
           Dense(nid);
         } else if ("nn.batch_norm" == op_name) {
@@ -585,11 +587,6 @@ std::tuple<
 
     // Enable ReLU
     dnnl::primitive_attr attr;
-//    if (has_relu) {
-//      dnnl::post_ops ops;
-//      ops.append_eltwise(1.f, dnnl::algorithm::eltwise_relu, 0.f, 0.f);
-//      attr.set_post_ops(ops);
-//    }
 
     // out rescale
     auto out_scale = calc_out_scale(node, KH, KW, IC, OC);
@@ -745,6 +742,124 @@ std::tuple<
                          {DNNL_ARG_WEIGHTS, conv2d_weights_memory},
                          {DNNL_ARG_BIAS, conv2d_bias_memory},
                          {DNNL_ARG_DST, conv2d_dst_memory}});
+  }
+
+  static std::vector<int32_t> quasi_dense(std::vector<int32_t>data , std::vector<int8_t> weight,
+                                          int IC, int OC) {
+    const auto* w_ptr = weight.data();
+    std::vector<int32_t> res (OC, 0);
+    for (int oc = 0; oc < OC; oc++)
+      for (int ic = 0; ic < IC; ic++)
+          res[oc] += data[ic] * static_cast<int32_t>(*w_ptr++);
+    return res;
+  }
+
+  std::tuple<
+      std::vector<float>,   // o_scl
+      std::vector<int32_t>, // new_bias
+      float,  // clip_low
+      float   // clip_high
+  > calc_qnn_dense_args(const JSONGraphNode& node, int IC, int OC) {
+    std::vector<float> o_scl(OC);
+    std::vector<int32_t> new_bias(OC);
+    float clip_low = 0, clip_high = 0;
+
+    // 0-1 in weight
+    // 2-5 demse
+    // 6 - bias
+    // 7-10 - requant args
+    auto in1_entry = node.GetInputs()[0];     // not used
+    auto weight_entry = node.GetInputs()[1];  // not used
+    // conv quant args
+    auto data_zp_entry = node.GetInputs()[2];  // should be zero
+    auto wght_zp_entry = node.GetInputs()[3];  // should be zero
+    auto data_scl_entry = node.GetInputs()[4]; // not used
+    auto wght_scl_entry = node.GetInputs()[5]; // not used
+    // bias
+    auto bias_entry = node.GetInputs()[6];
+    // requant args
+    auto rq_i_scl_entry = node.GetInputs()[7];
+    auto rq_i_zp_entry = node.GetInputs()[8];  // should be zero
+    auto rq_o_scl_entry = node.GetInputs()[9];
+    auto rq_o_zp_entry = node.GetInputs()[10];
+
+    auto data_zp = get_values<int32_t>(data_zp_entry, IC);
+    auto weight = get_values<int8_t>(weight_entry, OC*IC);
+    auto bias = get_values<int32_t>(bias_entry, OC);
+    auto rq_i_scl = get_values<float>(rq_i_scl_entry, OC);
+    auto rq_i_zp = get_values<int32_t>(rq_i_zp_entry, OC);
+    auto rq_o_scl = get_values<float>(rq_o_scl_entry, OC);
+    auto rq_o_zp = get_values<int32_t>(rq_o_zp_entry, OC);
+
+    auto zp_D = quasi_dense(data_zp, weight, IC, OC);
+
+    for (int i = 0; i < OC; i++) {
+      o_scl[i] = rq_i_scl[i] / rq_o_scl[i];
+      new_bias[i] = bias[i] + static_cast<int32_t>(rq_o_scl[i]/rq_i_scl[i] * rq_o_zp[i]) - zp_D[i] - rq_i_zp[i];
+    }
+
+    return {o_scl, new_bias, clip_low, clip_high};
+  }
+
+  void QnnDense(const size_t& nid) {
+    auto node = nodes_[nid];
+
+    // Setup attributes.
+    auto data_entry = node.GetInputs()[0];
+    auto weight_entry = node.GetInputs()[1];
+    auto bias_entry = node.GetInputs()[6];
+    dnnl::memory::dims input_shape = nodes_[data_entry.id_].GetOpShape()[data_entry.index_];
+    dnnl::memory::dims weight_shape = nodes_[weight_entry.id_].GetOpShape()[weight_entry.index_];
+
+    dnnl::memory::dim
+        NB = input_shape[0],   // batch size
+        IC = input_shape[1],   // input channels
+        OC = weight_shape[0];  // weight width
+
+    dnnl::memory::dims data_dims = {NB, IC};
+    dnnl::memory::dims weight_dims = {OC, IC};
+    dnnl::memory::dims bias_dims = {OC};
+    dnnl::memory::dims out_dims = {NB, OC};
+
+    // Memory descriptions.
+    auto data_md = dnnl::memory::desc({data_dims, dt::u8, tag::ab});
+    auto weight_md = dnnl::memory::desc({weight_dims, dt::s8, tag::ab});
+    auto bias_md = dnnl::memory::desc({bias_dims, dt::s32, tag::a});
+    auto dst_md = dnnl::memory::desc({out_dims, dt::u8, tag::ab});
+
+    // specify output scale and bias update
+    std::vector<float> o_scale (OC, 0);
+    std::vector<int32_t> new_bias (OC, 0);
+    float clip_low, clip_high;
+
+    std::tie(o_scale, new_bias, clip_low, clip_high) =
+        calc_qnn_dense_args(node, IC, OC);
+
+    auto bias_memory = dnnl::memory(bias_md, engine_);
+    std::copy(new_bias.begin(), new_bias.end(),
+              static_cast<int32_t*>(bias_memory.get_data_handle()));
+
+    dnnl::primitive_attr attr;
+    attr.set_output_scales(1<<1, o_scale);
+
+    // Dense description.
+    auto dense_desc = dnnl::inner_product_forward::desc(dnnl::prop_kind::forward_inference, data_md,
+                                                        weight_md, bias_md, dst_md);
+    auto dense_prim_desc = dnnl::inner_product_forward::primitive_desc(dense_desc, attr, engine_);
+    auto dense = dnnl::inner_product_forward(dense_prim_desc);
+
+    // Memories.
+    auto data_memory = BindDNNLMemory(data_entry, data_md);
+    auto weight_memory = BindDNNLMemory(weight_entry, weight_md);
+
+    JSONGraphNodeEntry out_entry(nid, 0);
+    auto dst_memory = BindDNNLMemory(out_entry, dense_prim_desc.dst_desc());
+
+    net_.push_back(dense);
+    net_args_.push_back({{DNNL_ARG_SRC, data_memory},
+                         {DNNL_ARG_WEIGHTS, weight_memory},
+                         {DNNL_ARG_BIAS, bias_memory},
+                         {DNNL_ARG_DST, dst_memory}});
   }
 
   void Dense(const size_t& nid) {
