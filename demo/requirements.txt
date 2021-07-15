@@ -1,0 +1,6 @@
+Pillow 
+numpy 
+decorator 
+scipy 
+attrs 
+pytest
