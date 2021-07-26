@@ -63,6 +63,7 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
 
   void Run() override {
     // Bind input buffers
+    std::map<dnnl_memory_t, dnnl::memory> io_replacement;
     for (size_t i = 0; i < input_nodes_.size(); ++i) {
       auto eid = EntryID(input_nodes_[i], 0);
       if (std::find(input_var_eid_.begin(), input_var_eid_.end(), eid) == input_var_eid_.end())
@@ -70,23 +71,62 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
       // TODO(@apeskov): check if entry_out_mem_[eid] exists
       //   check is sizes/dtype/offset is matched,
       // TODO(@comaniac): Support other data lengths.
-      auto mem = entry_out_mem_[eid].first;
-      size_t buffer_size = GetDataSize(*data_entry_[eid]);
-      mem.set_data_handle(data_entry_[eid]->data);
+//      auto mem = entry_out_mem_[eid].first;
+//      size_t buffer_size = GetDataSize(*data_entry_[eid]);
+//      mem.set_data_handle(data_entry_[eid]->data);
+
+      // TODO(@apeskov): Thread safety. Do not touch original memory just replace it
+      //  with now one.
+      auto orig_mem = entry_out_mem_[eid].first;
+      auto orig_desc = orig_mem.get_desc();
+      auto orig_c_hdl = orig_mem.get();
+      auto new_one_mem = dnnl::memory(orig_desc, engine_, data_entry_[eid]->data);
+      io_replacement[orig_c_hdl] = new_one_mem;
     }
     // Bind output buffers
     for (size_t i = 0; i < outputs_.size(); ++i) {
       auto eid = EntryID(outputs_[i]);
-      auto mem = entry_out_mem_[eid].first;
-      mem.set_data_handle(data_entry_[eid]->data);
+//      auto mem = entry_out_mem_[eid].first;
+//      mem.set_data_handle(data_entry_[eid]->data);
+      auto orig_mem = entry_out_mem_[eid].first;
+      auto orig_desc = orig_mem.get_desc();
+      auto orig_c_hdl = orig_mem.get();
+      auto new_one_mem = dnnl::memory(orig_desc, engine_, data_entry_[eid]->data);
+      io_replacement[orig_c_hdl] = new_one_mem;
     }
 
     // Invoke the engine through intepreting the stream.
     for (size_t i = 0; i < net_.size(); ++i) {
       auto prim = net_.at(i);
-      net_.at(i).execute(stream_, net_args_.at(i));
+      auto args = net_args_.at(i);
+      for (auto &kvp : args) {
+        auto orig_mem_c_hdl = kvp.second.get();
+        if (io_replacement.count(orig_mem_c_hdl) != 0)
+          kvp.second = io_replacement[orig_mem_c_hdl];
+      }
+//      std::cout << "conv" << std::endl;
+//      for (auto &arg : args) {
+//        std::cout << "  ptr: " << arg.second.get_data_handle() << std::endl;
+//      }
+      net_.at(i).execute(stream_, args);
     }
     stream_.wait();
+  }
+
+  void ShareMemory(const DNNLJSONRuntime &other) {
+    auto orig = internal_mem_;
+    internal_mem_ = other.internal_mem_;
+    // update args
+    for (auto &args : net_args_) {
+      for (auto &p : args) {
+        auto mem = p.second;
+        auto found = std::find(orig.begin(), orig.end(), mem);
+        if (found != orig.end()) {
+          auto idx = std::distance(found, orig.begin());
+          p.second = internal_mem_[idx];
+        }
+      }
+    }
   }
 
  private:
@@ -629,6 +669,9 @@ std::tuple<
                          {DNNL_ARG_WEIGHTS, conv2d_weights_memory},
                          {DNNL_ARG_BIAS, conv2d_bias_memory},
                          {DNNL_ARG_DST, conv2d_dst_memory}});
+
+    internal_mem_.push_back(conv2d_weights_memory);
+    internal_mem_.push_back(conv2d_bias_memory);
   }
 
   void QnnConv2dSum(const size_t& nid) {
@@ -742,6 +785,9 @@ std::tuple<
                          {DNNL_ARG_WEIGHTS, conv2d_weights_memory},
                          {DNNL_ARG_BIAS, conv2d_bias_memory},
                          {DNNL_ARG_DST, conv2d_dst_memory}});
+
+    internal_mem_.push_back(conv2d_weights_memory);
+    internal_mem_.push_back(conv2d_bias_memory);
   }
 
   static std::vector<int32_t> quasi_dense(std::vector<int32_t>data , std::vector<int8_t> weight,
@@ -860,6 +906,9 @@ std::tuple<
                          {DNNL_ARG_WEIGHTS, weight_memory},
                          {DNNL_ARG_BIAS, bias_memory},
                          {DNNL_ARG_DST, dst_memory}});
+
+    internal_mem_.push_back(weight_memory);
+    internal_mem_.push_back(bias_memory);
   }
 
   void Dense(const size_t& nid) {
@@ -1060,6 +1109,8 @@ std::tuple<
   std::vector<std::unordered_map<int, dnnl::memory>> net_args_;
   /* The entry ID to its corresponding output memory. */
   std::unordered_map<uint32_t, std::pair<dnnl::memory, size_t>> entry_out_mem_;
+  /* Internal tensors. Are not matched with entry ID */
+  std::vector<dnnl::memory> internal_mem_;
 };
 
 runtime::Module DNNLJSONRuntimeCreate(String symbol_name, String graph_json,
