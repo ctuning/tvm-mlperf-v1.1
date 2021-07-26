@@ -17,8 +17,9 @@
 
 FROM ubuntu:20.04
 
-RUN apt-get update --fix-missing
-RUN DEBIAN_FRONTEND=noninteractive apt-get -yq install cmake llvm-12 clang-12 git
+RUN apt-get update --fix-missing; \
+    DEBIAN_FRONTEND=noninteractive apt-get -yq install cmake llvm-12 clang-12 git python3-pip
+RUN pip3 install Pillow numpy torch decorator scipy attrs pytest
 
 WORKDIR /tmp/exp
 
@@ -79,10 +80,6 @@ RUN mkdir __build_tvm_omp; cd __build_tvm_omp; \
         -DCMAKE_PREFIX_PATH=/tmp/exp/__build_dnnl_omp/bin
 
 RUN cd __build_tvm_omp; cmake --build . -j8; cmake --install .
-
-RUN DEBIAN_FRONTEND=noninteractive apt-get -yq install python3-pip
-
-RUN pip3 install Pillow numpy torch decorator scipy attrs pytest
 
 ENV PYTHONPATH=/tmp/exp/tvm/python:${PYTHONPATH}
 ENV TVM_LIBS=/tmp/exp/__build_tvm_seq

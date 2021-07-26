@@ -14,7 +14,7 @@ DNNL int8 scoring demo (Resnet-50)
    ```shell
    CC=/usr/local/Cellar/llvm/11.1.0_1/bin/clang \
    CXX=/usr/local/Cellar/llvm/11.1.0_1/bin/clang++ \
-   cmake .. \ 
+   cmake .. \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX=bin
    ```
@@ -43,7 +43,7 @@ For convenience of building and model compilation there is a docker equivalent w
 Example of commands to prepare image and run commend inside container:
    ```shell
       cd <root-of-tvm>
-      docker build . --tag tvm_dnnl_int8 -f ./demo/docker/Dockerfile.tvm
+      docker build . --tag tvm_dnnl_int8 -f ./demo/docker/Dockerfile.dnnl_build
       docker run -tdi -v ${PWD}/demo:/workspace --name int8_bench tvm_dnnl_int8 bash
       docker attach int8_bench
    ```

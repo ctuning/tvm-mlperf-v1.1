@@ -71,7 +71,8 @@ def arena_wrp(init_f, action_f, args, arena_size, arena_idx, still_running, init
     res_time[arena_idx] = tot_duration
 
 
-def run_within_arenas(init_f, action_f, args, *, arena_size=1, arena_num=None, benchmark_time_sec=10):
+def run_within_arenas(init_f, action_f, args, *, arena_size=1, arena_num=None,
+                      benchmark_time_sec=10, chillout_time_sec=0):
     if arena_num is None:
         arena_num = (multiprocessing.cpu_count() - 1) // arena_size + 1
 
@@ -95,6 +96,7 @@ def run_within_arenas(init_f, action_f, args, *, arena_size=1, arena_num=None, b
     for p in processes:
         p.join()
         assert p.exitcode == 0
+        p.terminate()
 
     total_count = 0
     total_duration = 0.0
@@ -106,7 +108,15 @@ def run_within_arenas(init_f, action_f, args, *, arena_size=1, arena_num=None, b
     latency = total_duration * 1000
     throughput = benchmark_time_sec * 1000 / total_count
     print(f"Arena SZ:{arena_size}, NUM:{arena_num}, L:{latency:.2f}, THRP:{throughput:.2f}")
+
+    time.sleep(chillout_time_sec)
     return latency, throughput
+
+# def run_within_arenas(init_f, action_f, args, *, arena_size=1, arena_num=None,
+#                       benchmark_time_sec=10, chillout_time_sec=0):
+#     lib = init_f(*args)
+#     thread_runner(lib, arena_size, arena_num)
+#     return thread_runner.run(benchmark_time_sec, chillout_time_sec)
 
 
 def print_to_csv(file_path, res):
@@ -119,22 +129,24 @@ def main():
     module_path = "__prebuilt/dnnl_int8_resnet50.so"
     img_path = "__data/cat3.png"
 
-    # One trial time
-    benchmark_time_sec = 3
+    benchmark_time_sec = 5
     chill_out_time_sec = 1
 
     num_cores = multiprocessing.cpu_count()
 
     latency_mod_res = []
     throughput_mod_res = []
+    scalability_mod_res = []
 
     # Latency mode evaluation. Single subprocess.
     print("=== Latency mode ===")
     for arena_size in range(1, num_cores + 1):
         res = run_within_arenas(init_f=load_module, action_f=run_module, args=(module_path, img_path),
-                                arena_size=arena_size, arena_num=1, benchmark_time_sec=benchmark_time_sec)
+                                arena_size=arena_size, arena_num=1,
+                                benchmark_time_sec=benchmark_time_sec,
+                                chillout_time_sec=chill_out_time_sec
+                                )
         latency_mod_res.append((arena_size, res))
-        time.sleep(chill_out_time_sec)
     print_to_csv("latency.csv", latency_mod_res)
 
     # Throughput mode evaluation. Several subprocess with equal num of internal threads(arena_size).
@@ -142,10 +154,22 @@ def main():
     print("=== Throughput mode ===")
     for arena_size in range(1, min(31, num_cores)):
         res = run_within_arenas(init_f=load_module, action_f=run_module, args=(module_path, img_path),
-                                arena_size=arena_size, arena_num=None, benchmark_time_sec=benchmark_time_sec)
+                                arena_size=arena_size, arena_num=None,
+                                benchmark_time_sec=benchmark_time_sec,
+                                chillout_time_sec=chill_out_time_sec
+                                )
         throughput_mod_res.append((arena_size, res))
-        time.sleep(chill_out_time_sec)
     print_to_csv("throughput.csv", throughput_mod_res)
+
+    print("=== Scalability mode ===")
+    for arena_num in range(1, num_cores + 1):
+        res = run_within_arenas(init_f=load_module, action_f=run_module, args=(module_path, img_path),
+                                arena_size=1, arena_num=arena_num,
+                                benchmark_time_sec=benchmark_time_sec,
+                                chillout_time_sec=chill_out_time_sec
+                                )
+        scalability_mod_res.append((arena_num, res))
+    print_to_csv("scalability.csv", scalability_mod_res)
 
 
 if __name__ == "__main__":

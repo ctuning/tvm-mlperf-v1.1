@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import sys
 import os
+import platform
 
 import tvm
 from tvm.relay.build_module import bind_params_by_name
@@ -108,7 +109,8 @@ def main():
     img_path = "__data/cat3.png"
     model_path = "__data/resnet50_INT8bit_quantized.pt"
     os.makedirs("__prebuilt", exist_ok=True)
-    export_model_path = "__prebuilt/dnnl_int8_resnet50.so"
+    so_ext = "dylib" if platform.system() == "Darwin" else "so"
+    export_model_path = f"__prebuilt/dnnl_int8_resnet50.{so_ext}"
 
     compile_resnet(model_path, export_model_path)
     check_accuracy(model_path, export_model_path, img_path)
