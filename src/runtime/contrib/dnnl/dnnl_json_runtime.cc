@@ -61,6 +61,98 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
         << "The number of input constants must match the number of required.";
   }
 
+  void Run(const std::vector<const DLTensor*> &inputs,
+           const std::vector<const DLTensor*> &outputs) {
+    // map of memory object to replace with provided in/out
+    std::map<dnnl_memory_t, dnnl::memory> io_replacement;
+
+    ICHECK(inputs.size() == input_var_eid_.size());
+    for (int i = 0; i < inputs.size(); i++) {
+      const auto tensor = inputs[i];
+      const auto eid = input_var_eid_[i];
+
+      // Constructing a new one memory object pointed on DLTensor memory
+      // TODO(@apeskov) : should be a single constructor with check of ability to wrap
+      auto orig_mem = entry_out_mem_[eid].first;
+      auto orig_desc = orig_mem.get_desc();
+      auto new_one_mem = dnnl::memory(orig_desc, engine_, tensor->data);
+
+      io_replacement[orig_mem.get()] = new_one_mem;
+    }
+
+    ICHECK(outputs.size() == outputs_.size());
+    for (size_t i = 0; i < outputs_.size(); ++i) {
+      auto eid = EntryID(outputs_[i]);
+      const auto tensor = outputs[i];
+
+      auto orig_mem = entry_out_mem_[eid].first;
+      auto orig_desc = orig_mem.get_desc();
+      auto new_one_mem = dnnl::memory(orig_desc, engine_, tensor->data);
+
+      io_replacement[orig_mem.get()] = new_one_mem;
+    }
+
+    // Invoke the engine through intepreting the stream.
+    for (size_t i = 0; i < net_.size(); ++i) {
+      auto prim = net_.at(i);
+      auto args = net_args_.at(i);
+      for (auto &kvp : args) {
+        auto orig_mem_c_hdl = kvp.second.get();
+        if (io_replacement.count(orig_mem_c_hdl) != 0)
+          kvp.second = io_replacement[orig_mem_c_hdl];
+      }
+      net_.at(i).execute(stream_, args);
+    }
+    stream_.wait();
+  }
+
+  /**
+   * Override GetFunction() to specify Run method.
+   *
+   * @param name
+   * @param sptr_to_self
+   * @return
+   */
+  PackedFunc GetFunction(const std::string& name, const ObjectPtr<Object>& sptr_to_self) override {
+    if (this->symbol_name_ == name) {
+      return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
+        ICHECK(this->initialized_) << "The module has not been initialized";
+
+        ICHECK_EQ(args.size(), input_var_eid_.size() + outputs_.size())
+          << "Found mismatch in the number of provided data entryies and required.";
+
+        auto copy_arg_tensors = [](TVMArgs &args, size_t start, size_t size) {
+          std::vector<const DLTensor*> res(size);
+
+          for (size_t idx = 0; idx < size; idx++) {
+            const size_t arg_idx = start + idx;
+            ICHECK(args[arg_idx].type_code() == kTVMNDArrayHandle ||
+                   args[arg_idx].type_code() == kTVMDLTensorHandle)
+              << "Expect NDArray or DLTensor as inputs";
+
+            const DLTensor* arg;
+            if (args[arg_idx].IsObjectRef<NDArray>()) {
+              NDArray arr = args[idx];
+              arg = arr.operator->();
+            } else {
+              arg = args[arg_idx].operator DLTensor*();
+            }
+            res[idx] = arg;
+          }
+          return res;
+        };
+
+        auto inputs = copy_arg_tensors(args, 0, input_var_eid_.size());
+        auto outputs = copy_arg_tensors(args, input_var_eid_.size(), outputs_.size());
+
+        // Execute the subgraph.
+        this->Run(inputs, outputs);
+      });
+    } else {
+      return JSONRuntimeBase::GetFunction(name, sptr_to_self);
+    }
+  }
+
   void Run() override {
     // Bind input buffers
     std::map<dnnl_memory_t, dnnl::memory> io_replacement;
@@ -104,10 +196,6 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
         if (io_replacement.count(orig_mem_c_hdl) != 0)
           kvp.second = io_replacement[orig_mem_c_hdl];
       }
-//      std::cout << "conv" << std::endl;
-//      for (auto &arg : args) {
-//        std::cout << "  ptr: " << arg.second.get_data_handle() << std::endl;
-//      }
       net_.at(i).execute(stream_, args);
     }
     stream_.wait();
