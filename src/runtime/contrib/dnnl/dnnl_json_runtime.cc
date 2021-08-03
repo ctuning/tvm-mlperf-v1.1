@@ -63,6 +63,10 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
 
   void Run(const std::vector<const DLTensor*> &inputs,
            const std::vector<const DLTensor*> &outputs) {
+    // TODO: Is it thread safe to use one stream from different threads?
+    //       In case of CPU engine that is safe, because stream is
+    //       immediate runner and has no internal state.
+    dnnl::stream cur_stream = stream_;
     // map of memory object to replace with provided in/out
     std::map<dnnl_memory_t, dnnl::memory> io_replacement;
 
@@ -92,26 +96,40 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
       io_replacement[orig_mem.get()] = new_one_mem;
     }
 
-    // Invoke the engine through intepreting the stream.
-    for (size_t i = 0; i < net_.size(); ++i) {
-      auto prim = net_.at(i);
-      auto args = net_args_.at(i);
+    auto replace_io = [&io_replacement] (std::unordered_map<int, dnnl::memory> &args) {
       for (auto &kvp : args) {
         auto orig_mem_c_hdl = kvp.second.get();
         if (io_replacement.count(orig_mem_c_hdl) != 0)
           kvp.second = io_replacement[orig_mem_c_hdl];
       }
-      net_.at(i).execute(stream_, args);
+    };
+
+    auto replace_scratchpad = [this] (std::unordered_map<int, dnnl::memory> &args) {
+      auto found = args.find(DNNL_ARG_SCRATCHPAD);
+      if (found != args.end()) {
+        auto scratchpad_desc = found->second.get_desc();
+        auto new_scratchpad = dnnl::memory(scratchpad_desc, this->engine_);
+        found->second = new_scratchpad;
+      }
+    };
+
+    // Invoke the engine through intepreting the stream.
+    for (size_t i = 0; i < net_.size(); ++i) {
+      auto prim = net_.at(i);
+      auto args = net_args_.at(i);
+      replace_io(args);
+      replace_scratchpad(args);
+      net_.at(i).execute(cur_stream, args);
     }
-    stream_.wait();
+    cur_stream.wait();
   }
 
   /**
    * Override GetFunction() to specify Run method.
    *
-   * @param name
-   * @param sptr_to_self
-   * @return
+   * @param name name of queried function
+   * @param sptr_to_self pointer to self module
+   * @return Found function in PackedFunc format, or null if no present
    */
   PackedFunc GetFunction(const std::string& name, const ObjectPtr<Object>& sptr_to_self) override {
     if (this->symbol_name_ == name) {
@@ -728,6 +746,9 @@ std::tuple<
     std::copy(out_zero_point.begin(), out_zero_point.end(),
               static_cast<int32_t*>(conv2d_bias_memory.get_data_handle()));
 
+    // Explicit scratchpad specification
+    attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
+
     auto conv2d_prim_desc = dnnl::convolution_forward::primitive_desc(conv_desc, attr, engine_);
 
     // Push to the network.
@@ -753,10 +774,19 @@ std::tuple<
 
     // Bind memory buffers.
     net_.push_back(conv);
-    net_args_.push_back({{DNNL_ARG_SRC, conv2d_src_memory},
-                         {DNNL_ARG_WEIGHTS, conv2d_weights_memory},
-                         {DNNL_ARG_BIAS, conv2d_bias_memory},
-                         {DNNL_ARG_DST, conv2d_dst_memory}});
+    std::unordered_map<int, dnnl::memory> args {{DNNL_ARG_SRC, conv2d_src_memory},
+                                                {DNNL_ARG_WEIGHTS, conv2d_weights_memory},
+                                                {DNNL_ARG_BIAS, conv2d_bias_memory},
+                                                {DNNL_ARG_DST, conv2d_dst_memory}};
+
+    auto scratchpad_desc = conv2d_prim_desc.scratchpad_desc();
+    if (scratchpad_desc) {
+      dnnl::memory scratchpad_mem(scratchpad_desc, engine_);
+      internal_mem_.push_back(scratchpad_mem);
+      args[DNNL_ARG_SCRATCHPAD] = scratchpad_mem;
+    }
+
+    net_args_.push_back(args);
 
     internal_mem_.push_back(conv2d_weights_memory);
     internal_mem_.push_back(conv2d_bias_memory);
@@ -833,6 +863,9 @@ std::tuple<
 
     attr.set_post_ops(pops);
 
+    // Explicit scratchpad specification
+    attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
+
     auto conv2d_prim_desc = dnnl::convolution_forward::primitive_desc(conv_desc, attr, engine_);
     auto conv = dnnl::convolution_forward(conv2d_prim_desc);
 
@@ -869,11 +902,21 @@ std::tuple<
 
     // Bind memory buffers.
     net_.push_back(conv);
-    net_args_.push_back({{DNNL_ARG_SRC, conv2d_src_memory},
-                         {DNNL_ARG_WEIGHTS, conv2d_weights_memory},
-                         {DNNL_ARG_BIAS, conv2d_bias_memory},
-                         {DNNL_ARG_DST, conv2d_dst_memory}});
+    std::unordered_map<int, dnnl::memory> args {
+      {DNNL_ARG_SRC, conv2d_src_memory},
+      {DNNL_ARG_WEIGHTS, conv2d_weights_memory},
+      {DNNL_ARG_BIAS, conv2d_bias_memory},
+      {DNNL_ARG_DST, conv2d_dst_memory}
+    };
 
+    auto scratchpad_desc = conv2d_prim_desc.scratchpad_desc();
+    if (scratchpad_desc) {
+      dnnl::memory scratchpad_mem(scratchpad_desc, engine_);
+      internal_mem_.push_back(scratchpad_mem);
+      args[DNNL_ARG_SCRATCHPAD] = scratchpad_mem;
+    }
+
+    net_args_.push_back(args);
     internal_mem_.push_back(conv2d_weights_memory);
     internal_mem_.push_back(conv2d_bias_memory);
   }
@@ -976,6 +1019,9 @@ std::tuple<
     dnnl::primitive_attr attr;
     attr.set_output_scales(1<<1, o_scale);
 
+    // Explicit scratchpad specification
+    attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
+
     // Dense description.
     auto dense_desc = dnnl::inner_product_forward::desc(dnnl::prop_kind::forward_inference, data_md,
                                                         weight_md, bias_md, dst_md);
@@ -990,10 +1036,21 @@ std::tuple<
     auto dst_memory = BindDNNLMemory(out_entry, dense_prim_desc.dst_desc());
 
     net_.push_back(dense);
-    net_args_.push_back({{DNNL_ARG_SRC, data_memory},
-                         {DNNL_ARG_WEIGHTS, weight_memory},
-                         {DNNL_ARG_BIAS, bias_memory},
-                         {DNNL_ARG_DST, dst_memory}});
+    std::unordered_map<int, dnnl::memory> args {
+      {DNNL_ARG_SRC, data_memory},
+      {DNNL_ARG_WEIGHTS, weight_memory},
+      {DNNL_ARG_BIAS, bias_memory},
+      {DNNL_ARG_DST, dst_memory}
+    };
+
+    auto scratchpad_desc = dense_prim_desc.scratchpad_desc();
+    if (scratchpad_desc) {
+      dnnl::memory scratchpad_mem(scratchpad_desc, engine_);
+      internal_mem_.push_back(scratchpad_mem);
+      args[DNNL_ARG_SCRATCHPAD] = scratchpad_mem;
+    }
+
+    net_args_.push_back(args);
 
     internal_mem_.push_back(weight_memory);
     internal_mem_.push_back(bias_memory);
@@ -1040,6 +1097,7 @@ std::tuple<
     write_to_dnnl_memory(bias.data(), bias_memory, OC * sizeof(float));
     JSONGraphNodeEntry out_entry(nid, 0);
     auto dst_memory = BindDNNLMemory(out_entry, dense_prim_desc.dst_desc());
+
 
     net_args_.push_back({{DNNL_ARG_SRC, data_memory},
                          {DNNL_ARG_WEIGHTS, weight_memory},
