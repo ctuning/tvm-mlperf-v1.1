@@ -106,7 +106,7 @@ class MetadataModuleNode : public ModuleNode {
    *    - CSourceModule
    *    - JSON runtime module
    *
-   *  The initializer iterates through the imported modules and intilizes the
+   *  The initializer iterates through the imported modules and initializes the
    *  found module accordingly by passing the needed metadata into it.
    */
   void InitSubModule(const std::string& symbol) {
