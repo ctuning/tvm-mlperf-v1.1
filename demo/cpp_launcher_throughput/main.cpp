@@ -31,9 +31,8 @@ std::thread create_worker(tvm::runtime::Module &mod_factory, DLDevice &dev, bool
   return thr;
 }
 
-int main_check (std::string model_path, int NUM, int TIME) {
+int main_check (tvm::runtime::Module mod_factory, int NUM, int TIME) {
 //  std::cout << "Hello (" << NUM << ")" << std::endl;
-  auto mod_factory = tvm::runtime::Module::LoadFromFile(model_path);
 
   DLDevice dev {kDLCPU, 0};
   // create workers
@@ -67,36 +66,16 @@ int main_check (std::string model_path, int NUM, int TIME) {
 
 
 int main(int argc, char **argv) {
-  if (argc != 2) {
+  if (argc != 3) {
     std::cout << "expected path to model as argument" << std::endl;
     return 1;
   }
 
   std::string model_path(argv[1]);
-  for (int NUM = 1; NUM < 9; NUM++) {
-    main_check(model_path, NUM, 5);
-    return 0;
+  int NUM = std::atoi(argv[2]);
+  auto mod_factory = tvm::runtime::Module::LoadFromFile(model_path);
+
+  for (int n = 1; n < NUM; n++) {
+    main_check(mod_factory, n, 1);
   }
 }
-/**
- * Possible Async API
- *
- * Option #1
- * def worker_handler():
- *   input = get_input_from_pool()
- *   out = worker.run() // blocking but release Python thread
- *   store_output_to_pool(out)
- *
- * Option #2 (worker_pool)
- * def worker_handler():
- *   input = get_input_from_pool()
- *   worker_pool.run_async(graph) // blocking but release Python thread
- *   store_output_to_pool(out)
- *
- *  * def worker_handler():
- *   input = get_input_from_pool()
- *   worker_pool.run_async(graph) // blocking but release Python thread
- *   store_output_to_pool(out)
- *
- */
-
