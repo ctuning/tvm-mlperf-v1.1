@@ -34,6 +34,7 @@ RUN mkdir __build_dnnl_omp; cd __build_dnnl_omp; \
         -DCMAKE_INSTALL_PREFIX=bin \
         -DDNNL_BUILD_TESTS=OFF \
         -DDNNL_BUILD_EXAMPLES=OFF \
+        -DDNNL_ENABLE_CONCURRENT_EXEC=ON \
         -DDNNL_CPU_RUNTIME=OMP
 
 RUN cd __build_dnnl_omp; cmake --build . -j8; cmake --install .
@@ -47,6 +48,7 @@ RUN mkdir __build_dnnl_seq; cd __build_dnnl_seq; \
         -DCMAKE_INSTALL_PREFIX=bin \
         -DDNNL_BUILD_TESTS=OFF \
         -DDNNL_BUILD_EXAMPLES=OFF \
+        -DDNNL_ENABLE_CONCURRENT_EXEC=ON \
         -DDNNL_CPU_RUNTIME=SEQ
 
 RUN cd __build_dnnl_seq; cmake --build . -j8; cmake --install .
