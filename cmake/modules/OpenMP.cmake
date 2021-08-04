@@ -16,7 +16,7 @@
 # under the License.
 
 if(APPLE AND NOT CMAKE_CXX_COMPILER_ID MATCHES "AppleClang")
-  link_directories("/usr/local/Cellar/llvm/11.1.0_1/lib")
+  link_directories("/usr/local/Cellar/llvm/12.0.0_1/lib")
   if(CMAKE_C_COMPILER_ID MATCHES "Clang")
     set(OpenMP_C "${CMAKE_C_COMPILER}")
     set(OpenMP_C_FLAGS "-fopenmp=libomp -Wno-unused-command-line-argument")
