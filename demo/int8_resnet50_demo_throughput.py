@@ -1,11 +1,14 @@
 import os
 import time
 import multiprocessing
+import threading
 import numpy as np
 from PIL import Image
 
 import tvm
 from tvm.contrib.graph_executor import GraphModule
+
+from queue import Queue
 
 
 def preprocess(img_data):
@@ -112,11 +115,77 @@ def run_within_arenas(init_f, action_f, args, *, arena_size=1, arena_num=None,
     time.sleep(chillout_time_sec)
     return latency, throughput
 
-# def run_within_arenas(init_f, action_f, args, *, arena_size=1, arena_num=None,
-#                       benchmark_time_sec=10, chillout_time_sec=0):
-#     lib = init_f(*args)
-#     thread_runner(lib, arena_size, arena_num)
-#     return thread_runner.run(benchmark_time_sec, chillout_time_sec)
+
+graph_holder = threading.local()
+
+
+def async_runner_routine(tasks_queue, lib):
+    # global graph_holder
+    # if graph_holder.graph is None:
+    dev = tvm.cpu()
+    graph = GraphModule(lib["default"](dev))
+
+    tot_count = 0
+    start_timestamp = time.time()
+    while True:
+        qitem = tasks_queue.get()
+        if qitem is None:
+            # None in the queue indicates the parent want us to exit
+            tasks_queue.task_done()
+            break
+
+        graph.set_input(0, qitem)
+        graph.run()
+        res = graph.get_output(0).numpy()
+        # print(res[0, 0])
+
+        tot_count += 1
+        tasks_queue.task_done()
+
+    tot_duration = time.time() - start_timestamp
+
+    # res_count[arena_idx] = tot_count
+    # res_time[arena_idx] = tot_duration
+
+
+def run_with_async_runner(init_f, action_f, args, *, arena_size=1, arena_num=None,
+                          benchmark_time_sec=10, chillout_time_sec=0):
+    lib = tvm.runtime.load_module(args[0])
+    # NOTE:! Initialization of module is not threadsafe so it may lead to problems
+    dev = tvm.cpu()
+    graph = GraphModule(lib["default"](dev))
+
+    # lib = init_f(*args)
+    # runner = AsyncGraphExecutor(lib)
+    runner = lib
+
+    # thread_runner(lib, arena_size, arena_num)
+    tasks = Queue(maxsize=arena_num * 4)
+    workers = []
+    result_dict = {}
+
+    for _ in range(arena_num):
+        worker = threading.Thread(target=async_runner_routine, args=(tasks, runner))
+        worker.daemon = True
+        workers.append(worker)
+        worker.start()
+
+    image = get_img("__data/cat3.png")
+
+    num_samples = 200
+    start_timestamp = time.time()
+    for _ in range(num_samples):
+        tasks.put(image)
+
+    for _ in range(arena_num):
+        tasks.put(None)
+
+    for worker in workers:
+        worker.join()
+
+    tot_duration = time.time() - start_timestamp
+
+    return 0, tot_duration * 1000 / num_samples
 
 
 def print_to_csv(file_path, res):
@@ -126,7 +195,8 @@ def print_to_csv(file_path, res):
 
 
 def main():
-    module_path = "__prebuilt/dnnl_int8_resnet50.so"
+    # module_path = "__prebuilt/dnnl_int8_resnet50.so"
+    module_path = "__prebuilt/dnnl_int8_resnet50.dylib"
     img_path = "__data/cat3.png"
 
     benchmark_time_sec = 5
@@ -170,6 +240,17 @@ def main():
                                 )
         scalability_mod_res.append((arena_num, res))
     print_to_csv("scalability.csv", scalability_mod_res)
+
+    print("=== Scalability mode. GIL release ===")
+    for arena_num in range(1, num_cores + 1):
+        res = run_with_async_runner(init_f=load_module, action_f=run_module, args=(module_path, img_path),
+                                    arena_size=1, arena_num=arena_num,
+                                    benchmark_time_sec=benchmark_time_sec,
+                                    chillout_time_sec=chill_out_time_sec
+                                    )
+        print(res)
+        scalability_mod_res.append((arena_num, res))
+    print_to_csv("scalability_gil.csv", scalability_mod_res)
 
 
 if __name__ == "__main__":
