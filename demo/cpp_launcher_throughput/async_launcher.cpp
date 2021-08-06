@@ -25,8 +25,8 @@ class AsyncLauncherFactoryNode : public ModuleNode {
   virtual PackedFunc GetFunction(const std::string& name,
                                  const ObjectPtr<Object>& sptr_to_self) final {
     if (name == "init") {
-      return TypedPackedFunc<void()>([sptr_to_self, this]() {
-        return this->init_();
+      return TypedPackedFunc<void(int)>([sptr_to_self, this](int worker_id) {
+        return this->init_(worker_id);
       });
     } else if (name == "infer") {
       return TypedPackedFunc<NDArray(NDArray)>([sptr_to_self, this](NDArray input) {
@@ -39,7 +39,7 @@ class AsyncLauncherFactoryNode : public ModuleNode {
   }
 
  private:
-  void init_() {
+  void init_(int worker_id) {
     graph_executor_ = lib_mod_.GetFunction("default")(dev_);
     run_ = graph_executor_.GetFunction("run");
     get_input_ = graph_executor_.GetFunction("get_input");
@@ -106,6 +106,15 @@ void CreateAsyncLauncherFactoryModule_(TVMArgs args, TVMRetValue* rv) {
   *rv = Module(make_object<AsyncLauncherFactoryNode>(lib_mod));
 }
 
-// Use TVM_EXPORT_PACKED_FUNC to export a function with
+void SetAffinity_(TVMArgs args, TVMRetValue* rv) {
+  int numa_id = args[0];
+  int core_start = args[0];
+  int core_end = args[0];
+  std::cout << "[STUB] try to bind to NUMA_" << numa_id
+            << " cores [" << core_start << ", " << core_end << "]"
+            << std::endl;
+}
+
 TVM_DLL_EXPORT_PACKED_FUNC(CreateAsyncLauncher, demo::CreateAsyncLauncherFactoryModule_);
+TVM_DLL_EXPORT_PACKED_FUNC(SetAffinity_, demo::SetAffinity_);
 }  // namespace demo
