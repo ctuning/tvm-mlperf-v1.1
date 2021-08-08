@@ -7,7 +7,7 @@ from PIL import Image
 
 import tvm
 from tvm.contrib.graph_executor import GraphModule
-from cpp_launcher_throughput.async_launcher import AsyncGraphExecutor
+from tvm.contrib.async_launcher import AsyncGraphExecutor
 
 from queue import Queue
 

@@ -36,9 +36,11 @@ class AsyncGraphExecutor:
     @classmethod
     def async_launcher_factory(cls):
         if cls._async_launcher_module is None:
-            search_path = "/Users/apeskov/git/tvm/cmake-build-debug-no-omp/demo/cpp_launcher_throughput/"
-            cls._async_launcher_module = tvm.runtime.load_module(search_path + "libasync_launcher.dylib")
-            cls._async_launcher_factory = cls._async_launcher_module["CreateAsyncLauncher"]
+            #  In case if we would like to use async runner as extension
+            # search_path = "/path/to/async_ext_module"
+            # cls._async_launcher_module = tvm.runtime.load_module(search_path + "libasync_launcher.dylib")
+            # cls._async_launcher_factory = cls._async_launcher_module["CreateAsyncLauncher"]
+            cls._async_launcher_factory = tvm.get_global_func("tvm.async_executor.create")
 
         return cls._async_launcher_factory
 
