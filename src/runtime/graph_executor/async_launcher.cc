@@ -60,21 +60,35 @@ class AsyncLauncherFactoryNode : public ModuleNode {
   void init_(int worker_id) {
     graph_executor_ = lib_mod_.GetFunction("default")(dev_);
     run_ = graph_executor_.GetFunction("run");
-    get_input_ = graph_executor_.GetFunction("get_input");
     set_input_zero_copy_ = graph_executor_.GetFunction("set_input_zero_copy");
+    get_input_ = graph_executor_.GetFunction("get_input");
     get_output_ = graph_executor_.GetFunction("get_output");
+    get_num_outputs_ = graph_executor_.GetFunction("get_num_outputs");
+    get_num_inputs_ = graph_executor_.GetFunction("get_num_inputs");
 
-    // Assumption that Batch is first dimension of first input tensor
-    NDArray input1 = get_input_(0);
-    model_batch_ = input1.Shape()[0];
+    // Only classification cases. One input, one output.
+    ICHECK(static_cast<int>(get_num_outputs_()) == 1);
+    ICHECK(static_cast<int>(get_num_inputs_()) == 1);
+
+    NDArray input = get_input_(0);
+    input_shape_ = input.Shape();
+
+    NDArray output = get_output_(0);
+    output_shape_ = output.Shape();
+
+    // Assumption that Batch is first dimension of input and output tensor
+    ICHECK_EQ(input_shape_[0], output_shape_[0]);
+    model_batch_ = input_shape_[0];
   }
 
   NDArray infer_(NDArray input) {
     ICHECK_GE(input.Shape().size(), 1);
-    auto input_batch = input.Shape()[0];
-    auto num_chunk = (input_batch - 1) / model_batch_ + 1;
+    auto cur_batch = input.Shape()[0];
+    auto num_chunk = (cur_batch - 1) / model_batch_ + 1;
 
-    NDArray output = NDArray::Empty({input_batch, 1000}, input.DataType(), dev_);
+    std::vector<ShapeTuple::index_type> output_shape {output_shape_.begin(), output_shape_.end()};
+    output_shape[0] = cur_batch;
+    NDArray output = NDArray::Empty(output_shape, input.DataType(), dev_);
 
     for (size_t chunk_idx = 0; chunk_idx < num_chunk; chunk_idx++) {
       // Inplace chunk view on input/output
@@ -112,11 +126,16 @@ class AsyncLauncherFactoryNode : public ModuleNode {
   Module lib_mod_;
   Module graph_executor_;
   PackedFunc run_;
-  PackedFunc get_input_;
   PackedFunc set_input_zero_copy_;
+  PackedFunc get_input_;
   PackedFunc get_output_;
+  PackedFunc get_num_outputs_;
+  PackedFunc get_num_inputs_;
 
   ShapeTuple::index_type model_batch_;
+
+  ShapeTuple input_shape_;
+  ShapeTuple output_shape_;
 };
 
 void CreateAsyncLauncherFactoryModule_(TVMArgs args, TVMRetValue* rv) {
